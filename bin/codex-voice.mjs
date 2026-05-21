@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,11 @@ const rootDir = path.resolve(path.dirname(__filename), "..");
 const scriptsDir = path.join(rootDir, "scripts");
 const keychainService = "codex-realtime-voice-kit";
 const defaultCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
+const configDir = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || process.cwd(), ".config"),
+  "codex-realtime-voice-kit",
+);
+const settingsPath = path.join(configDir, "settings.json");
 
 const modes = new Map([
   [
@@ -166,6 +171,79 @@ const geminiVoices = [
   "Sulafat",
 ];
 
+const settingsProviders = [
+  {
+    key: "official",
+    label: "Official OpenAI realtime",
+    script: "run-official-openai-realtime.sh",
+    fields: [
+      { key: "model", label: "Realtime model", env: "CODEX_REALTIME_MODEL", defaultValue: "gpt-realtime-1.5" },
+      { key: "voice", label: "Voice", env: "CODEX_REALTIME_VOICE", defaultValue: "marin", choices: openAIRealtimeVoices },
+    ],
+  },
+  {
+    key: "openai-realtime",
+    label: "OpenAI realtime bridge",
+    script: "run-openai-realtime-bridge.sh",
+    fields: [
+      { key: "model", label: "Realtime model", env: "LOCAL_REALTIME_OPENAI_REALTIME_MODEL", defaultValue: "gpt-realtime-mini" },
+      { key: "voice", label: "Voice", env: "LOCAL_REALTIME_OPENAI_REALTIME_VOICE", defaultValue: "marin", choices: openAIRealtimeVoices },
+    ],
+  },
+  {
+    key: "gemini",
+    label: "Gemini Live",
+    script: "run-gemini-live.sh",
+    fields: [
+      { key: "model", label: "Live model", env: "LOCAL_REALTIME_GEMINI_MODEL", defaultValue: "gemini-3.1-flash-live-preview" },
+      { key: "voice", label: "Voice", env: "LOCAL_REALTIME_GEMINI_VOICE", defaultValue: "Aoede", choices: geminiVoices },
+      { key: "bargeIn", label: "Barge-in", env: "LOCAL_REALTIME_GEMINI_ALLOW_BARGE_IN", defaultValue: "1", type: "boolean" },
+      { key: "bargeInRms", label: "Barge-in RMS", env: "LOCAL_REALTIME_GEMINI_BARGE_IN_RMS", defaultValue: "4200" },
+      { key: "bargeInMinMs", label: "Barge-in min ms", env: "LOCAL_REALTIME_GEMINI_BARGE_IN_MIN_MS", defaultValue: "1500" },
+    ],
+  },
+  {
+    key: "groq",
+    label: "Groq STT + Kokoro",
+    script: "run-groq-stt-kokoro.sh",
+    fields: [
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_GROQ_TRANSCRIBE_MODEL", defaultValue: "whisper-large-v3-turbo" },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+    ],
+  },
+  {
+    key: "openai-stt",
+    label: "OpenAI STT + Kokoro",
+    script: "run-openai-stt-kokoro.sh",
+    fields: [
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_TRANSCRIBE_MODEL", defaultValue: "gpt-4o-mini-transcribe" },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+    ],
+  },
+  {
+    key: "local",
+    label: "Local Whisper medium + Kokoro",
+    script: "run-local-whisper-kokoro.sh",
+    fields: [
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-medium.en" },
+      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu" },
+      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8" },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+    ],
+  },
+  {
+    key: "tiny",
+    label: "Local Whisper tiny + Kokoro",
+    script: "run-local-tiny-kokoro.sh",
+    fields: [
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-tiny.en" },
+      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu" },
+      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8" },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+    ],
+  },
+];
+
 async function main() {
   const argv = process.argv.slice(2);
   const command = (argv[0] || "help").toLowerCase();
@@ -187,6 +265,11 @@ async function main() {
 
   if (command === "doctor") {
     await doctor();
+    return;
+  }
+
+  if (command === "settings" || command === "config") {
+    await settingsTui(argv.slice(1));
     return;
   }
 
@@ -237,6 +320,7 @@ async function launchMode(mode, childArgs, options = {}) {
   }
 
   const env = { ...process.env };
+  applySavedSettings(mode, env, readSettings());
   await ensureKey(mode.key, env, options);
   applyLaunchOptions(mode, env, options);
 
@@ -364,6 +448,169 @@ function applyLaunchOptions(mode, env, options = {}) {
 
 function usesLocalBridge(mode) {
   return mode.script !== "run-official-openai-realtime.sh";
+}
+
+function providerForMode(mode) {
+  return settingsProviders.find((provider) => provider.script === mode.script) || null;
+}
+
+function readSettings() {
+  if (!existsSync(settingsPath)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(settings) {
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function applySavedSettings(mode, env, settings) {
+  const provider = providerForMode(mode);
+  if (!provider) return;
+  const saved = settings[provider.key];
+  if (!saved || typeof saved !== "object") return;
+
+  for (const field of provider.fields) {
+    const value = saved[field.key];
+    if (value === undefined || value === null || value === "") continue;
+    if (env[field.env]) continue;
+    env[field.env] = String(value);
+  }
+}
+
+async function settingsTui(args = []) {
+  const action = (args[0] || "").toLowerCase();
+  if (action === "show" || action === "list" || action === "--json") {
+    const settings = readSettings();
+    if (action === "--json") {
+      console.log(JSON.stringify(settings, null, 2));
+    } else {
+      printSettings(settings);
+    }
+    return;
+  }
+  if (action === "reset" || action === "clear") {
+    if (existsSync(settingsPath)) rmSync(settingsPath);
+    console.log(`Deleted settings: ${settingsPath}`);
+    return;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    let settings = readSettings();
+    while (true) {
+      clearScreen();
+      console.log("Codex Voice Settings");
+      console.log("");
+      console.log(`Saved at: ${settingsPath}`);
+      console.log("Press Enter to keep a value. Type - to clear a value.");
+      console.log("");
+      settingsProviders.forEach((provider, index) => {
+        console.log(`${index + 1}. ${provider.label}`);
+      });
+      console.log("s. Show current settings");
+      console.log("r. Reset all settings");
+      console.log("q. Quit");
+      console.log("");
+
+      const choice = (await rl.question("Choose: ")).trim().toLowerCase();
+      if (!choice || choice === "q" || choice === "quit" || choice === "exit") break;
+      if (choice === "s" || choice === "show") {
+        clearScreen();
+        printSettings(settings);
+        await rl.question("\nPress Enter to continue...");
+        continue;
+      }
+      if (choice === "r" || choice === "reset") {
+        const confirm = (await rl.question("Delete all saved settings? [y/N] ")).trim().toLowerCase();
+        if (confirm === "y" || confirm === "yes") {
+          settings = {};
+          if (existsSync(settingsPath)) rmSync(settingsPath);
+          console.log("Settings deleted.");
+          await rl.question("Press Enter to continue...");
+        }
+        continue;
+      }
+
+      const provider = settingsProviders[Number(choice) - 1];
+      if (!provider) continue;
+      settings = await editProviderSettings(rl, settings, provider);
+      writeSettings(settings);
+      console.log(`Saved ${provider.label} settings.`);
+      await rl.question("Press Enter to continue...");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function editProviderSettings(rl, settings, provider) {
+  clearScreen();
+  console.log(provider.label);
+  console.log("");
+  if (!settings[provider.key] || typeof settings[provider.key] !== "object") {
+    settings[provider.key] = {};
+  }
+
+  for (const field of provider.fields) {
+    const current = settings[provider.key][field.key] ?? "";
+    const shown = current || field.defaultValue || "";
+    if (field.choices?.length) {
+      console.log(`${field.label} choices: ${field.choices.join(", ")}`);
+    }
+
+    let value;
+    if (field.type === "boolean") {
+      value = await askBooleanSetting(rl, field.label, shown);
+    } else {
+      value = (await rl.question(`${field.label} [${shown}]: `)).trim();
+    }
+
+    if (!value) continue;
+    if (value === "-") {
+      delete settings[provider.key][field.key];
+      continue;
+    }
+    settings[provider.key][field.key] = value;
+  }
+
+  if (!Object.keys(settings[provider.key]).length) delete settings[provider.key];
+  return settings;
+}
+
+async function askBooleanSetting(rl, label, current) {
+  const currentBool = String(current || "1") !== "0";
+  const answer = (await rl.question(`${label} [${currentBool ? "Y" : "n"}]: `)).trim().toLowerCase();
+  if (!answer) return "";
+  if (answer === "-") return "-";
+  if (["y", "yes", "true", "1", "on"].includes(answer)) return "1";
+  if (["n", "no", "false", "0", "off"].includes(answer)) return "0";
+  console.log("Please answer y or n. Keeping current value.");
+  return "";
+}
+
+function printSettings(settings = readSettings()) {
+  console.log("Codex Voice Settings");
+  console.log("");
+  for (const provider of settingsProviders) {
+    console.log(provider.label);
+    const saved = settings[provider.key] || {};
+    for (const field of provider.fields) {
+      const value = saved[field.key] || field.defaultValue || "";
+      const source = saved[field.key] ? "saved" : "default";
+      console.log(`  ${field.label}: ${value || "(empty)"} (${source})`);
+    }
+    console.log("");
+  }
+}
+
+function clearScreen() {
+  if (process.stdout.isTTY) process.stdout.write("\x1Bc");
 }
 
 async function findFreePort(startPort) {
@@ -805,6 +1052,9 @@ Usage:
   codex-voice status
   codex-voice stop
   codex-voice doctor
+  codex-voice settings
+  codex-voice settings show
+  codex-voice settings reset
   codex-voice voices
   codex-voice key list
   codex-voice key set gemini
@@ -839,6 +1089,7 @@ Examples:
   codex-voice gemini --barge-in --barge-in-rms 4200
   codex-voice openai-realtime
   codex-voice official
+  codex-voice settings
   codex-voice gemini --replace-key
   codex-voice groq /path/to/project
   codex-voice status
