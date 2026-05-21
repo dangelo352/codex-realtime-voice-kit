@@ -60,6 +60,16 @@ For coding tasks, the bridge sends a realtime handoff event back to Codex:
 
 Codex then starts a normal backend coding turn.
 
+## Side Tasks
+
+The local bridge does not start a second parallel Codex agent yet. Instead, it
+protects the active handoff.
+
+If the user says “on the side,” “in the background,” “separately,” or “while
+that runs,” the bridge stores that request in `queuedSideTasks`. The current
+Codex turn keeps running. After it finishes, the bridge starts the side task as
+the next handoff and sends the side result back to the voice layer.
+
 ## Why `handoff-only` Transcript Mode Exists
 
 Codex can include `transcript_delta` with the handoff. That is useful with the

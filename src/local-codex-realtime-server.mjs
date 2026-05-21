@@ -105,6 +105,7 @@ class LocalRealtimeSession {
     this.handoffCount = 0;
     this.pendingHandoffs = new Map();
     this.queuedHandoffText = "";
+    this.queuedSideTasks = [];
     this.busyNoticeSent = false;
     this.lastHandoffAckAt = 0;
     this.greeted = false;
@@ -638,7 +639,22 @@ class LocalRealtimeSession {
     if (!prompt) prompt = this.openaiRealtimeInputTranscript.trim() || "Continue the user's requested coding task.";
 
     log(`[openai.realtime.tool] background_agent: ${prompt}`);
-    await this.requestBackgroundAgent(repairDelegationText(prompt), {
+    const repairedPrompt = repairDelegationText(prompt);
+    if (this.hasActiveHandoff()) {
+      const sideTask = isSidetrackRequest(repairedPrompt);
+      const queued = sideTask
+        ? this.queueSideTask(repairedPrompt, { target: "openai-realtime-side", source: "openai-realtime" })
+        : this.queueHandoff(repairedPrompt);
+      const notice = queued
+        ? sideTask
+          ? "Queued as a side task. I will keep the current Codex task running and report back when the side task finishes."
+          : "Codex is already working, so I queued this for after the current task."
+        : "Codex is already working. I did not start a duplicate task.";
+      await this.completeOpenAIRealtimeFunctionNotice(callId, notice);
+      return;
+    }
+
+    await this.requestBackgroundAgent(repairedPrompt, {
       callId,
       externalCallId: callId,
       target: "openai-realtime",
@@ -681,16 +697,21 @@ class LocalRealtimeSession {
     const cleanAnswer = String(answer || "").trim() || "Done.";
     const callId = pending.externalCallId || pending.callId;
     if (!callId) return;
+    await this.completeOpenAIRealtimeFunctionNotice(callId, cleanAnswer);
+  }
 
+  async completeOpenAIRealtimeFunctionNotice(callId, output) {
+    const cleanOutput = String(output || "").trim() || "Done.";
+    if (!callId) return;
     const ws = await this.ensureOpenAIRealtime();
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    log(`[openai.realtime.tool] sending Codex result call_id=${callId}`);
+    log(`[openai.realtime.tool] sending result call_id=${callId}`);
     this.sendOpenAIRealtimeEvent({
       type: "conversation.item.create",
       item: {
         type: "function_call_output",
         call_id: callId,
-        output: cleanAnswer,
+        output: cleanOutput,
       },
     });
     this.sendOpenAIRealtimeEvent({
@@ -699,6 +720,11 @@ class LocalRealtimeSession {
         output_modalities: ["audio"],
       },
     });
+  }
+
+  async sendOpenAIRealtimeSideTaskResult(answer) {
+    const cleanAnswer = String(answer || "").trim() || "Side task finished.";
+    await this.sendOpenAIRealtimeText(`[BACKEND side task finished]\n${cleanAnswer}`);
   }
 
   closeOpenAIRealtime() {
@@ -2037,6 +2063,10 @@ class LocalRealtimeSession {
       const pending = this.pendingHandoffs.get(callId);
       const output = String(item.output || "");
       if (output.startsWith("Background agent finished")) {
+        if (!pending) {
+          log(`[handoff] ignored finish for unknown call_id=${callId}`);
+          return;
+        }
         const answer = pending?.backendText?.trim() || "Done.";
         clearTimeout(pending?.fallbackTimer);
         if (pending?.target === "openai-realtime") {
@@ -2048,14 +2078,19 @@ class LocalRealtimeSession {
           }
           this.pendingHandoffs.delete(callId);
           this.busyNoticeSent = false;
-          const next = this.consumeQueuedHandoff();
-          if (next) {
-            setTimeout(() => {
-              this.requestBackgroundAgent(next).catch((error) => {
-                log(`[handoff] queued handoff failed: ${error.message}`);
-              });
-            }, 300);
+          this.scheduleNextQueuedWork();
+          return;
+        }
+        if (pending?.target === "openai-realtime-side") {
+          if (!pending.answerSent) {
+            pending.answerSent = true;
+            await this.sendOpenAIRealtimeSideTaskResult(answer);
+          } else {
+            log(`[handoff] skipped duplicate OpenAI realtime side result call_id=${callId}`);
           }
+          this.pendingHandoffs.delete(callId);
+          this.busyNoticeSent = false;
+          this.scheduleNextQueuedWork();
           return;
         }
         if (!pending?.answerSent) {
@@ -2068,14 +2103,7 @@ class LocalRealtimeSession {
         }
         this.pendingHandoffs.delete(callId);
         this.busyNoticeSent = false;
-        const next = this.consumeQueuedHandoff();
-        if (next) {
-          setTimeout(() => {
-            this.requestBackgroundAgent(next).catch((error) => {
-              log(`[handoff] queued handoff failed: ${error.message}`);
-            });
-          }, 300);
-        }
+        this.scheduleNextQueuedWork();
       }
       return;
     }
@@ -2125,6 +2153,15 @@ class LocalRealtimeSession {
       if (handoff.target === "openai-realtime") {
         await this.completeOpenAIRealtimeHandoff(handoff, handoff.backendText);
         this.pendingHandoffs.delete(handoff.callId || handoff.externalCallId);
+        this.busyNoticeSent = false;
+        this.scheduleNextQueuedWork();
+        return;
+      }
+      if (handoff.target === "openai-realtime-side") {
+        await this.sendOpenAIRealtimeSideTaskResult(handoff.backendText);
+        this.pendingHandoffs.delete(handoff.callId || handoff.externalCallId);
+        this.busyNoticeSent = false;
+        this.scheduleNextQueuedWork();
         return;
       }
       await this.sendAssistantAnswer(handoff.backendText, {
@@ -2141,9 +2178,16 @@ class LocalRealtimeSession {
     const cleanText = text.trim();
     if (!cleanText) return;
     if (this.hasActiveHandoff()) {
-      if (this.queueHandoff(cleanText)) {
+      const sideTask = options.sideTask || isSidetrackRequest(cleanText);
+      const queued = sideTask
+        ? this.queueSideTask(cleanText, {
+            source: options.source,
+            target: options.target === "openai-realtime" ? "openai-realtime-side" : options.target,
+          })
+        : this.queueHandoff(cleanText);
+      if (queued) {
         log(`[handoff] queued while active: ${cleanText}`);
-        this.scheduleHandoffAcknowledgement(cleanText, { queued: true });
+        this.scheduleHandoffAcknowledgement(cleanText, { queued: true, sideTask });
       }
       return;
     }
@@ -2161,12 +2205,15 @@ class LocalRealtimeSession {
             pending.answerSent = true;
             await this.sendAssistantAnswer(`I heard: ${cleanText}`);
             this.pendingHandoffs.delete(callId);
+            this.busyNoticeSent = false;
+            this.scheduleNextQueuedWork();
           }, handoffFallbackMs)
         : null;
     this.pendingHandoffs.set(callId, {
       callId,
       externalCallId: options.externalCallId || callId,
       target: options.target || "local",
+      sideTask: Boolean(options.sideTask),
       input: cleanText,
       backendText: "",
       answerSent: false,
@@ -2224,6 +2271,9 @@ class LocalRealtimeSession {
   queueHandoff(text) {
     const cleanText = text.trim();
     if (!cleanText) return false;
+    if (isSidetrackRequest(cleanText)) {
+      return this.queueSideTask(cleanText);
+    }
     if (this.hasActiveHandoff() && shouldIgnoreBusyDelegationPrompt(cleanText)) {
       log(`[handoff] ignored busy fragment: ${cleanText}`);
       return false;
@@ -2251,10 +2301,78 @@ class LocalRealtimeSession {
     return true;
   }
 
+  queueSideTask(text, options = {}) {
+    const cleanText = stripSidetrackRequest(text.trim());
+    if (!cleanText) return false;
+    if (this.hasActiveHandoff() && shouldIgnoreBusyDelegationPrompt(cleanText)) {
+      log(`[side-task] ignored busy fragment: ${cleanText}`);
+      return false;
+    }
+    if (this.isLikelyAssistantEcho(cleanText)) {
+      log(`[side-task] ignored queued assistant echo: ${cleanText}`);
+      return false;
+    }
+
+    const normalized = normalizeForIntent(cleanText);
+    const alreadyActive = [...this.pendingHandoffs.values()].some(
+      (handoff) => normalizeForIntent(handoff.input || "") === normalized,
+    );
+    if (alreadyActive) {
+      log(`[side-task] ignored duplicate active request: ${cleanText}`);
+      return false;
+    }
+    const alreadyQueued = this.queuedSideTasks.some(
+      (task) => normalizeForIntent(task.text || "") === normalized,
+    );
+    if (alreadyQueued) {
+      log(`[side-task] ignored duplicate queued request: ${cleanText}`);
+      return false;
+    }
+
+    this.queuedSideTasks.push({
+      text: cleanText,
+      source: options.source || "voice",
+      target: options.target || "local-side",
+      requestedAt: Date.now(),
+    });
+    log(`[side-task] queued: ${cleanText}`);
+    return true;
+  }
+
   consumeQueuedHandoff() {
     const next = this.queuedHandoffText.trim();
     this.queuedHandoffText = "";
     return next;
+  }
+
+  consumeQueuedSideTask() {
+    return this.queuedSideTasks.shift() || null;
+  }
+
+  scheduleNextQueuedWork() {
+    const sideTask = this.consumeQueuedSideTask();
+    if (sideTask) {
+      setTimeout(() => {
+        log(`[side-task] starting queued task: ${sideTask.text}`);
+        this.requestBackgroundAgent(sideTask.text, {
+          target: sideTask.target,
+          source: sideTask.source,
+          sideTask: true,
+        }).catch((error) => {
+          log(`[side-task] queued task failed: ${error.message}`);
+        });
+      }, 300);
+      return;
+    }
+
+    const next = this.consumeQueuedHandoff();
+    if (next) {
+      setTimeout(() => {
+        this.requestBackgroundAgent(next).catch((error) => {
+          log(`[handoff] queued handoff failed: ${error.message}`);
+        });
+      }, 300);
+    }
   }
 
   cancelPendingHandoffs(reason) {
@@ -2264,6 +2382,7 @@ class LocalRealtimeSession {
     const count = this.pendingHandoffs.size;
     this.pendingHandoffs.clear();
     this.queuedHandoffText = "";
+    this.queuedSideTasks = [];
     this.busyNoticeSent = false;
     if (count) log(`[handoff] cancelled pending=${count} reason=${reason}`);
   }
@@ -2513,8 +2632,32 @@ function extractItemText(item) {
 function handoffAcknowledgementFor(text, options = {}) {
   const normalized = repairLocalTranscript(normalizeForIntent(text || ""));
   const phrase = handoffActionPhrase(normalized);
+  if (options.sideTask) {
+    return options.queued
+      ? `I'm still working. I'll keep this as a side task.`
+      : `I'll handle that as a side task.`;
+  }
   if (options.queued) return `I'm still working. ${phrase.next}`;
   return phrase.now;
+}
+
+function isSidetrackRequest(text) {
+  const normalized = repairLocalTranscript(normalizeForIntent(text || ""));
+  return (
+    /\b(on the side|as a side task|side task|sidetrack|side track|side request)\b/.test(normalized) ||
+    /\b(while you do that|while that runs|while it runs|while that's running|while that is running)\b/.test(normalized) ||
+    /\b(in the background|separately|as a separate task|do not interrupt the current task|don't interrupt the current task)\b/.test(normalized)
+  );
+}
+
+function stripSidetrackRequest(text) {
+  return String(text || "")
+    .replace(/\b(as a side task|side task|sidetrack|side track|side request)\b/gi, "")
+    .replace(/\b(on the side|in the background|separately|as a separate task)\b/gi, "")
+    .replace(/\b(while you do that|while that runs|while it runs|while that's running|while that is running)\b/gi, "")
+    .replace(/\b(do not interrupt the current task|don't interrupt the current task)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function handoffActionPhrase(normalized) {
@@ -3167,7 +3310,9 @@ function defaultRealtimeBridgeInstructions() {
     "For casual questions, answer directly in one or two short sentences.",
     "For coding, codebase, repo, app, terminal, debugging, install, file, realtime hook, local API, browser, computer, desktop app, website, external page, or configuration work, call background_agent with the user's exact request.",
     "If the user asks to open, check, inspect, or use their browser, computer, app, or a website, call background_agent.",
+    "If the user says to do something on the side, in the background, separately, or while another task runs, still call background_agent and keep that wording in the prompt.",
     "After calling background_agent, wait for the function result before giving task details.",
+    "Messages prefixed [BACKEND side task finished] are completed side-task results. Read the result briefly, then continue the main conversation.",
     "If Codex is already working and the user asks a small side question, answer briefly when you can.",
     "Do not invent codebase details. Do not read markdown symbols, XML tags, diffs, or asterisks out loud.",
   ].join(" ");
@@ -3226,6 +3371,7 @@ function geminiLiveConfig(Modality, codexSessionInstructions = "") {
       "If the user asks what the codebase, repo, project, current folder, or app is about, call background_agent. Do not ask what project they mean.",
       "For coding, codebase, repo, app, terminal, debugging, install, file, realtime hook, local API, browser, computer, desktop app, website, external page, or configuration work, call background_agent with the user's exact request.",
       "If the user asks you to open, check, inspect, or use their browser, computer, app, or a website, do not say you cannot access it. Codex has those tools. Call background_agent.",
+      "If the user says to do something on the side, in the background, separately, or while another task runs, call background_agent and keep that wording in the prompt.",
       "After calling background_agent, do not answer the task yourself and do not ask the user for missing task details. Wait for [BACKEND] context before giving task details.",
       "If Codex is already working and the user asks a small side question, answer it briefly. Otherwise stay quiet until [BACKEND] context arrives.",
       "Do not invent codebase details. Do not read logs, diffs, markdown bullets, or asterisks out loud.",

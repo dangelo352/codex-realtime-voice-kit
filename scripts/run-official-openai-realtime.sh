@@ -15,6 +15,26 @@ if [[ -z "${CODEX_HOME:-}" ]]; then
   export CODEX_HOME="${HOME}/.codex"
 fi
 
-exec "${CODEX_BIN}" \
-  --enable realtime_conversation \
+toml_string() {
+  local value="${1//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+REALTIME_MODEL="${CODEX_REALTIME_MODEL:-${LOCAL_REALTIME_OPENAI_REALTIME_MODEL:-}}"
+REALTIME_VOICE="${CODEX_REALTIME_VOICE:-${LOCAL_REALTIME_OPENAI_REALTIME_VOICE:-}}"
+
+CODEX_ARGS=(
+  --enable realtime_conversation
   --cd "${TARGET_DIR}"
+)
+
+if [[ -n "${REALTIME_MODEL}" ]]; then
+  CODEX_ARGS+=(-c "experimental_realtime_ws_model=$(toml_string "${REALTIME_MODEL}")")
+fi
+
+if [[ -n "${REALTIME_VOICE}" ]]; then
+  CODEX_ARGS+=(-c "realtime.voice=$(toml_string "${REALTIME_VOICE}")")
+fi
+
+exec "${CODEX_BIN}" "${CODEX_ARGS[@]}"

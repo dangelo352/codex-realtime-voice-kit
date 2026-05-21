@@ -111,6 +111,28 @@ const keySpecs = [
   { env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], account: "gemini-api-key", name: "Gemini" },
 ];
 
+const openAIRealtimeVoices = [
+  "alloy",
+  "arbor",
+  "ash",
+  "ballad",
+  "breeze",
+  "cedar",
+  "coral",
+  "cove",
+  "echo",
+  "ember",
+  "juniper",
+  "maple",
+  "marin",
+  "sage",
+  "shimmer",
+  "sol",
+  "spruce",
+  "vale",
+  "verse",
+];
+
 const geminiVoices = [
   "Zephyr",
   "Puck",
@@ -328,6 +350,9 @@ function applyLaunchOptions(mode, env, options = {}) {
   if (mode.script === "run-gemini-live.sh") {
     if (options.voice) env.LOCAL_REALTIME_GEMINI_VOICE = options.voice;
     if (options.model) env.LOCAL_REALTIME_GEMINI_MODEL = options.model;
+  } else if (mode.script === "run-official-openai-realtime.sh") {
+    if (options.voice) env.CODEX_REALTIME_VOICE = options.voice.toLowerCase();
+    if (options.model) env.CODEX_REALTIME_MODEL = options.model;
   } else if (mode.script === "run-openai-realtime-bridge.sh") {
     if (options.voice) env.LOCAL_REALTIME_OPENAI_REALTIME_VOICE = options.voice;
     if (options.model) env.LOCAL_REALTIME_OPENAI_REALTIME_MODEL = options.model;
@@ -759,10 +784,15 @@ function unique(values) {
 }
 
 function printGeminiVoices() {
+  console.log("OpenAI/Codex realtime voice names:");
+  console.log(openAIRealtimeVoices.join(", "));
+  console.log("");
   console.log("Gemini voice names:");
   console.log(geminiVoices.join(", "));
   console.log("");
   console.log("Example:");
+  console.log("  codex-voice official --voice cedar");
+  console.log("  codex-voice openai-realtime --voice marin");
   console.log("  codex-voice gemini --voice Aoede");
   console.log("  codex-voice gemini --voice Leda");
 }
@@ -792,8 +822,8 @@ Modes:
   moshi          Moshi local speech-to-speech experiment
 
 Voice model options:
-  --voice <name>           Gemini/OpenAI voice override
-  --model <model>          Gemini/OpenAI model override
+  --voice <name>           Official/OpenAI/Gemini voice override
+  --model <model>          Official/OpenAI/Gemini realtime model override
   --barge-in-rms <number>  Lower means easier interruption
   --barge-in-min-ms <ms>   How soon interruption can stop speech
   --barge-in               Turn automatic interruption on
@@ -804,6 +834,8 @@ Examples:
   codex-voice groq
   codex-voice gemini
   codex-voice gemini --voice Leda
+  codex-voice official --voice cedar --model gpt-realtime-1.5
+  codex-voice openai-realtime --voice marin --model gpt-realtime-mini
   codex-voice gemini --barge-in --barge-in-rms 4200
   codex-voice openai-realtime
   codex-voice official

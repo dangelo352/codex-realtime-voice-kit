@@ -19,6 +19,8 @@ export OPENAI_API_KEY="replace-with-openai-api-key"
 Official realtime:
 
 ```bash
+export CODEX_REALTIME_MODEL="gpt-realtime-1.5"
+export CODEX_REALTIME_VOICE="marin"
 ./scripts/run-official-openai-realtime.sh /path/to/project
 ```
 
@@ -28,6 +30,13 @@ OpenAI realtime through the local bridge:
 export LOCAL_REALTIME_OPENAI_REALTIME_MODEL="gpt-realtime-mini"
 export LOCAL_REALTIME_OPENAI_REALTIME_VOICE="marin"
 ./scripts/run-openai-realtime-bridge.sh /path/to/project
+```
+
+With the wrapper:
+
+```bash
+codex-voice official --voice cedar --model gpt-realtime-1.5
+codex-voice openai-realtime --voice marin --model gpt-realtime-mini
 ```
 
 This keeps the OpenAI key inside the bridge and passes only a placeholder key to

@@ -34,6 +34,8 @@ codex-voice groq /path/to/project
 codex-voice openai-realtime /path/to/project
 codex-voice gemini /path/to/project
 codex-voice official /path/to/project
+codex-voice official --voice cedar --model gpt-realtime-1.5
+codex-voice openai-realtime --voice marin --model gpt-realtime-mini
 codex-voice gemini --voice Leda
 codex-voice gemini --model gemini-3.1-flash-live-preview
 codex-voice status
@@ -81,10 +83,17 @@ over Gemini or trigger speaker echo. Codex results are read fully by default.
 Gemini barge-in is on in safer `transcript` mode: the bridge only stops the
 voice after Gemini hears new user words, not just because the mic got loud.
 
+If Codex is already working and you say something like “check this on the side”
+or “do this while that runs,” the bridge keeps that request in a side-task queue.
+It does not redirect the active Codex handoff. When the active task finishes, the
+side task runs next and the voice layer gets a separate side-task result.
+
 Gemini defaults to `gemini-3.1-flash-live-preview` with the
 `Aoede` voice. Change it without editing files:
 
 ```bash
+codex-voice official --voice cedar --model gpt-realtime-1.5
+codex-voice openai-realtime --voice marin --model gpt-realtime-mini
 codex-voice gemini --voice Leda
 codex-voice gemini --voice Aoede
 codex-voice gemini --no-barge-in
@@ -131,6 +140,8 @@ to run with API-key auth.
 
 ```bash
 export OPENAI_API_KEY="replace-with-openai-api-key"
+export CODEX_REALTIME_MODEL="gpt-realtime-1.5"
+export CODEX_REALTIME_VOICE="marin"
 ./scripts/run-official-openai-realtime.sh /path/to/project
 ```
 
