@@ -9,6 +9,7 @@
   },
   "scripts": {
     "server": "node src/local-codex-realtime-server.mjs",
+    "setup": "node bin/codex-voice.mjs setup",
     "check": "node --check src/local-codex-realtime-server.mjs && node --check bin/codex-voice.mjs",
     "openai-realtime": "./scripts/run-openai-realtime-bridge.sh",
     "groq": "./scripts/run-groq-stt-kokoro.sh",

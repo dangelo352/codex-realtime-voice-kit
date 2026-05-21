@@ -120,9 +120,13 @@ class LocalRealtimeSession {
     this.openaiRealtimeInputTranscript = "";
     this.openaiRealtimeOutputTranscript = "";
     this.openaiRealtimeAudioItemId = "";
+    this.openaiRealtimeAudioMs = 0;
     this.openaiRealtimeActiveResponseId = "";
     this.openaiRealtimeResponseCreatePending = false;
     this.openaiRealtimeHandledFunctionCalls = new Set();
+    this.openaiRealtimeQuiet = false;
+    this.openaiRealtimeBargeInFrames = 0;
+    this.openaiRealtimeBargeInUntil = 0;
     this.geminiReadyPromise = null;
     this.geminiSession = null;
     this.geminiVoiceSession = null;
@@ -449,7 +453,9 @@ class LocalRealtimeSession {
     if (!this.openaiRealtimeWs || this.openaiRealtimeWs.readyState !== WebSocket.OPEN) return;
     this.sendOpenAIRealtimeEvent({
       type: "session.update",
-      session: openAIRealtimeSessionConfig(this.codexSessionInstructions),
+      session: openAIRealtimeSessionConfig(this.codexSessionInstructions, {
+        quiet: this.openaiRealtimeQuiet,
+      }),
     });
   }
 
@@ -459,10 +465,14 @@ class LocalRealtimeSession {
 
     const outputActive =
       this.speaking || isSpeechOutputActive() || Date.now() < this.codexAudioOutputUntil;
+    if (Date.now() >= this.openaiRealtimeBargeInUntil) {
+      this.openaiRealtimeBargeInUntil = 0;
+    }
     if (
       outputActive &&
-      process.env.LOCAL_REALTIME_OPENAI_SUPPRESS_OUTPUT_ECHO !== "0" &&
-      this.shouldDropSpeakerEchoAudio(rms, "openai")
+      !this.openaiRealtimeBargeInUntil &&
+      process.env.LOCAL_REALTIME_OPENAI_SUPPRESS_OUTPUT_ECHO === "1" &&
+      this.shouldDropOpenAIRealtimeSpeakerAudio(rms)
     ) {
       return;
     }
@@ -497,6 +507,7 @@ class LocalRealtimeSession {
     if (event.type === "error") {
       const message = event.error?.message || event.message || "OpenAI Realtime error";
       log(`[openai.realtime] error: ${message}`);
+      if (/cancellation failed:\s*no active response found/i.test(message)) return;
       if (/active response in progress/i.test(message)) {
         this.openaiRealtimeResponseCreatePending = true;
         return;
@@ -512,7 +523,10 @@ class LocalRealtimeSession {
 
     if (event.type === "input_audio_buffer.speech_started") {
       log("[openai.realtime] speech started");
-      this.stopCurrentSpeechOutput("openai-speech-started");
+      if (openAIRealtimeBargeInMode() !== "off") {
+        this.truncateOpenAIRealtimeAudio("openai-speech-started");
+        this.stopCurrentSpeechOutput("openai-speech-started");
+      }
       this.send(event);
       return;
     }
@@ -528,6 +542,7 @@ class LocalRealtimeSession {
     ) {
       const transcript = String(event.transcript || event.delta || "").trim();
       if (transcript) {
+        if (await this.maybeHandleOpenAIRealtimeListeningTranscript(transcript)) return;
         this.openaiRealtimeInputTranscript = appendTranscriptChunk(
           this.openaiRealtimeInputTranscript,
           transcript,
@@ -542,7 +557,10 @@ class LocalRealtimeSession {
       const delta = String(event.delta || "");
       const itemId = event.item_id || this.openaiRealtimeAudioItemId || `item_openai_audio_${Date.now()}`;
       const audioChunk = delta ? Buffer.from(delta, "base64") : Buffer.alloc(0);
-      this.openaiRealtimeAudioItemId = itemId;
+      if (this.openaiRealtimeAudioItemId !== itemId) {
+        this.openaiRealtimeAudioItemId = itemId;
+        this.openaiRealtimeAudioMs = 0;
+      }
       this.send({
         ...event,
         type: "response.output_audio.delta",
@@ -552,7 +570,11 @@ class LocalRealtimeSession {
         channels: 1,
         samples_per_channel: Math.floor(audioChunk.length / 2),
       });
-      if (audioChunk.length) this.markCodexAudioOutput(audioChunk);
+      if (audioChunk.length) {
+        const samples = Math.floor(audioChunk.length / 2);
+        this.openaiRealtimeAudioMs += Math.max(1, Math.round((samples * 1000) / 24000));
+        this.markCodexAudioOutput(audioChunk);
+      }
       return;
     }
 
@@ -563,6 +585,7 @@ class LocalRealtimeSession {
         item_id: event.item_id || this.openaiRealtimeAudioItemId,
       });
       this.openaiRealtimeAudioItemId = "";
+      this.openaiRealtimeAudioMs = 0;
       return;
     }
 
@@ -605,6 +628,8 @@ class LocalRealtimeSession {
     if (event.type === "response.done") {
       await this.handleOpenAIRealtimeResponseDone(event.response || {});
       this.openaiRealtimeActiveResponseId = "";
+      this.openaiRealtimeAudioItemId = "";
+      this.openaiRealtimeAudioMs = 0;
       this.send(event);
       this.flushOpenAIRealtimeResponseCreate();
       return;
@@ -639,6 +664,14 @@ class LocalRealtimeSession {
   }
 
   async handleOpenAIRealtimeFunctionCall(item) {
+    if (item.name === "set_listening_mode") {
+      await this.handleOpenAIRealtimeListeningModeCall(item);
+      return;
+    }
+    if (item.name === "wait_for_user") {
+      await this.handleOpenAIRealtimeWaitForUserCall(item);
+      return;
+    }
     if (item.name !== "background_agent") return;
     const callId = item.call_id || `call_openai_${++this.handoffCount}`;
     if (this.openaiRealtimeHandledFunctionCalls.has(callId)) {
@@ -684,6 +717,108 @@ class LocalRealtimeSession {
     });
   }
 
+  async handleOpenAIRealtimeListeningModeCall(item) {
+    const callId = item.call_id || `call_openai_listening_${++this.handoffCount}`;
+    if (this.openaiRealtimeHandledFunctionCalls.has(callId)) {
+      log(`[openai.realtime.tool] ignored duplicate function call_id=${callId}`);
+      return;
+    }
+    this.openaiRealtimeHandledFunctionCalls.add(callId);
+
+    let mode = "";
+    try {
+      const args = JSON.parse(item.arguments || "{}");
+      mode = String(args.mode || args.state || "").toLowerCase().trim();
+    } catch {
+      mode = String(item.arguments || "").toLowerCase().trim();
+    }
+
+    const quiet = /quiet|mute|pause|stop|off|not_listening|not listening/.test(mode);
+    const active = /listen|active|resume|on|back/.test(mode);
+    if (quiet) {
+      await this.sendOpenAIRealtimeFunctionOutput(
+        callId,
+        `Quiet mode enabled. Wake phrase: ${quietWakePhraseDisplay()}.`,
+        { createResponse: false },
+      );
+      await this.setOpenAIRealtimeQuiet(true, "openai-tool", { ack: true });
+      return;
+    }
+    if (active) {
+      await this.sendOpenAIRealtimeFunctionOutput(callId, "Listening mode enabled.", {
+        createResponse: false,
+      });
+      await this.setOpenAIRealtimeQuiet(false, "openai-tool", { ack: true });
+      return;
+    }
+
+    await this.sendOpenAIRealtimeFunctionOutput(callId, "Unknown listening mode.", {
+      createResponse: false,
+    });
+  }
+
+  async handleOpenAIRealtimeWaitForUserCall(item) {
+    const callId = item.call_id || `call_openai_wait_${++this.handoffCount}`;
+    if (this.openaiRealtimeHandledFunctionCalls.has(callId)) {
+      log(`[openai.realtime.tool] ignored duplicate function call_id=${callId}`);
+      return;
+    }
+    this.openaiRealtimeHandledFunctionCalls.add(callId);
+    await this.sendOpenAIRealtimeFunctionOutput(callId, "Waiting silently for the user.", {
+      createResponse: false,
+    });
+  }
+
+  async maybeHandleOpenAIRealtimeListeningTranscript(transcript) {
+    const normalized = normalizeForIntent(transcript);
+    if (isQuietModeRequest(normalized)) {
+      await this.setOpenAIRealtimeQuiet(true, "transcript", { ack: true });
+      return true;
+    }
+    if (this.openaiRealtimeQuiet && isQuietWakeRequest(normalized)) {
+      const followup = textAfterQuietWake(transcript);
+      await this.setOpenAIRealtimeQuiet(false, "transcript-wake", { ack: false });
+      await this.sendOpenAIRealtimeText(
+        followup ||
+          "[SYSTEM] The user came back after quiet mode. Briefly say you are listening again.",
+      );
+      return true;
+    }
+    return false;
+  }
+
+  async setOpenAIRealtimeQuiet(quiet, reason, options = {}) {
+    if (this.openaiRealtimeQuiet === quiet) return;
+
+    this.openaiRealtimeQuiet = quiet;
+    this.openaiRealtimeInputTranscript = "";
+    this.openaiRealtimeOutputTranscript = "";
+    this.openaiRealtimeResponseCreatePending = false;
+
+    if (quiet) {
+      this.truncateOpenAIRealtimeAudio(reason);
+      if (this.openaiRealtimeActiveResponseId) {
+        this.sendOpenAIRealtimeEvent({ type: "response.cancel" });
+        this.openaiRealtimeActiveResponseId = "";
+      }
+      this.stopCurrentSpeechOutput(`quiet-${reason}`);
+      log(`[quiet] enabled reason=${reason}`);
+      this.sendOpenAIRealtimeSessionUpdate();
+      if (options.ack !== false) {
+        await this.sendAssistantAnswer(
+          `Okay. Quiet mode is on. Say "${quietWakePhraseDisplay()}" when you want me again.`,
+        );
+      }
+      return;
+    }
+
+    log(`[quiet] disabled reason=${reason}`);
+    this.sendOpenAIRealtimeSessionUpdate();
+    if (options.ack !== false) {
+      await this.sendAssistantAnswer("I am back. Listening again.");
+    }
+  }
+
   sendOpenAIRealtimeEvent(event) {
     if (!this.openaiRealtimeWs || this.openaiRealtimeWs.readyState !== WebSocket.OPEN) return false;
     this.openaiRealtimeWs.send(JSON.stringify(event));
@@ -719,6 +854,10 @@ class LocalRealtimeSession {
   }
 
   async completeOpenAIRealtimeFunctionNotice(callId, output) {
+    await this.sendOpenAIRealtimeFunctionOutput(callId, output, { createResponse: true });
+  }
+
+  async sendOpenAIRealtimeFunctionOutput(callId, output, options = {}) {
     const cleanOutput = String(output || "").trim() || "Done.";
     if (!callId) return;
     const ws = await this.ensureOpenAIRealtime();
@@ -732,10 +871,14 @@ class LocalRealtimeSession {
         output: cleanOutput,
       },
     });
-    this.requestOpenAIRealtimeResponseCreate();
+    if (options.createResponse !== false) this.requestOpenAIRealtimeResponseCreate();
   }
 
   requestOpenAIRealtimeResponseCreate() {
+    if (this.openaiRealtimeQuiet) {
+      log("[openai.realtime] skipped response.create while quiet");
+      return;
+    }
     if (this.openaiRealtimeActiveResponseId) {
       this.openaiRealtimeResponseCreatePending = true;
       log(`[openai.realtime] delayed response.create active=${this.openaiRealtimeActiveResponseId}`);
@@ -1577,6 +1720,21 @@ class LocalRealtimeSession {
       reason,
     });
     this.openaiRealtimeAudioItemId = "";
+    this.openaiRealtimeAudioMs = 0;
+  }
+
+  truncateOpenAIRealtimeAudio(reason) {
+    const itemId = this.openaiRealtimeAudioItemId;
+    if (!itemId) return false;
+    const audioEndMs = Math.max(0, Math.round(this.openaiRealtimeAudioMs || 0));
+    const sent = this.sendOpenAIRealtimeEvent({
+      type: "conversation.item.truncate",
+      item_id: itemId,
+      content_index: 0,
+      audio_end_ms: audioEndMs,
+    });
+    log(`[openai.realtime] truncate audio item=${itemId} audio_end_ms=${audioEndMs} reason=${reason}`);
+    return sent;
   }
 
   onGeminiPlaybackState(isSpeaking) {
@@ -1821,6 +1979,44 @@ class LocalRealtimeSession {
     const echoWindowMs = Number(process.env.LOCAL_REALTIME_ECHO_WINDOW_MS || 90000);
     if (Date.now() - this.lastSpokenAt > echoWindowMs) return false;
     return this.recentSpokenTexts.some((spokenText) => isLikelyEchoOf(text, spokenText));
+  }
+
+  shouldDropOpenAIRealtimeSpeakerAudio(rms) {
+    if (process.env.LOCAL_REALTIME_SUPPRESS_SPEAKER_ECHO === "0") return false;
+    if (openAIRealtimeBargeInMode() !== "local") {
+      return this.shouldDropSpeakerEchoAudio(rms, "openai");
+    }
+
+    const threshold = Number(
+      process.env.LOCAL_REALTIME_OPENAI_BARGE_IN_RMS ||
+        process.env.LOCAL_REALTIME_BARGE_IN_RMS ||
+        3200,
+    );
+    const minFrames = Number(process.env.LOCAL_REALTIME_OPENAI_BARGE_IN_FRAMES || 8);
+    const passThroughMs = Number(process.env.LOCAL_REALTIME_OPENAI_BARGE_IN_PASS_MS || 2500);
+
+    if (threshold > 0 && rms >= threshold) {
+      this.openaiRealtimeBargeInFrames += 1;
+    } else {
+      this.openaiRealtimeBargeInFrames = Math.max(0, this.openaiRealtimeBargeInFrames - 1);
+    }
+
+    if (threshold > 0 && this.openaiRealtimeBargeInFrames >= minFrames) {
+      log(
+        `[openai.barge-in] allowing mic audio rms=${Math.round(rms)} threshold=${threshold} frames=${this.openaiRealtimeBargeInFrames}`,
+      );
+      this.openaiRealtimeBargeInFrames = 0;
+      this.openaiRealtimeBargeInUntil = Date.now() + passThroughMs;
+      this.truncateOpenAIRealtimeAudio("local-barge-in");
+      if (this.openaiRealtimeActiveResponseId) {
+        this.sendOpenAIRealtimeEvent({ type: "response.cancel" });
+        this.openaiRealtimeActiveResponseId = "";
+      }
+      this.stopCurrentSpeechOutput("local-barge-in");
+      return false;
+    }
+
+    return this.shouldDropSpeakerEchoAudio(rms, "openai");
   }
 
   shouldDropSpeakerEchoAudio(rms, source) {
@@ -2726,6 +2922,52 @@ function handoffActionPhrase(normalized) {
   return { now: "I'll handle that now.", next: "I'll handle that next." };
 }
 
+function isQuietModeRequest(normalized) {
+  return (
+    /\b(quiet mode|go quiet|be quiet|mute yourself|pause listening)\b/.test(normalized) ||
+    /\b(stop|pause|disable|turn off)\b.*\b(listening|hearing|responding|replies|voice)\b/.test(normalized) ||
+    /\b(don't|do not)\b.*\b(listen|hear|respond|reply)\b/.test(normalized)
+  );
+}
+
+function isQuietWakeRequest(normalized) {
+  const allowBareWake = process.env.LOCAL_REALTIME_OPENAI_ALLOW_BARE_WAKE === "1";
+  const assistantName = /\b(codex|assistant|realtime|real time|voice)\b/;
+  const backPhrase = /\b(i am back|i'm back|im back)\b/;
+  return (
+    (allowBareWake && /^(hey|hi|hello|ok|okay|yo)?\s*(i am back|i'm back|im back)$/.test(normalized)) ||
+    (assistantName.test(normalized) &&
+      /\b(i am back|i'm back|im back|start listening|resume listening|listen again)\b/.test(normalized)) ||
+    (backPhrase.test(normalized) && assistantName.test(normalized)) ||
+    /\b(hey|hi|hello|ok|okay|yo)\b.*\b(i am back|i'm back|im back)\b/.test(normalized) ||
+    /\b(start|resume|enable|turn on)\b.*\b(listening|voice|replies|responding)\b/.test(normalized) ||
+    /\b(you can listen|listen again|wake up)\b/.test(normalized)
+  );
+}
+
+function quietWakePhraseDisplay() {
+  return "Hey, I'm back; Codex, I'm back; start listening; or resume listening";
+}
+
+function textAfterQuietWake(text) {
+  let clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+
+  clean = clean.replace(
+    /^(hey|hi|hello|ok|okay|yo)?[\s,]*(codex|assistant|realtime|real time|voice)?[\s,]*(i am back|i'm back|im back|start listening|resume listening|listen again|wake up)[\s,.!?-]*/i,
+    "",
+  );
+  clean = clean.replace(
+    /^(codex|assistant|realtime|real time|voice)?[\s,]*(you can listen|listen again|wake up)[\s,.!?-]*/i,
+    "",
+  );
+  clean = clean.replace(
+    /^(start|resume|enable|turn on)[\s,]*(listening|voice|replies|responding)[\s,.!?-]*/i,
+    "",
+  );
+  return clean.trim();
+}
+
 function classifyTranscript(text, isBusy) {
   const cleanText = text.trim();
   const normalized = repairLocalTranscript(normalizeForIntent(cleanText));
@@ -3224,6 +3466,17 @@ function openAIRealtimeVoice() {
   return (process.env.LOCAL_REALTIME_OPENAI_REALTIME_VOICE || "marin").trim();
 }
 
+function openAIRealtimeBargeInMode() {
+  const mode = String(process.env.LOCAL_REALTIME_OPENAI_BARGE_IN_MODE || "safe")
+    .toLowerCase()
+    .trim();
+  if (["safe", "speaker", "speaker-safe", "default"].includes(mode)) return "safe";
+  if (["official", "server", "openai"].includes(mode)) return "official";
+  if (["local", "rms"].includes(mode)) return "local";
+  if (["off", "none", "disabled", "0", "false"].includes(mode)) return "off";
+  return "safe";
+}
+
 function openAIRealtimeUrl() {
   const baseUrl = (process.env.LOCAL_REALTIME_OPENAI_REALTIME_URL || "wss://api.openai.com/v1/realtime")
     .replace(/\/+$/, "");
@@ -3244,7 +3497,8 @@ function openAIRealtimeHeaders(apiKey) {
   return headers;
 }
 
-function openAIRealtimeSessionConfig(codexSessionInstructions = "") {
+function openAIRealtimeSessionConfig(codexSessionInstructions = "", options = {}) {
+  const quiet = Boolean(options.quiet);
   const sessionContext = codexSessionContextForGemini(codexSessionInstructions);
   const instructions = [
     process.env.LOCAL_REALTIME_OPENAI_SYSTEM || defaultRealtimeBridgeInstructions(),
@@ -3273,8 +3527,8 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "") {
         },
         turn_detection: {
           type: process.env.LOCAL_REALTIME_OPENAI_TURN_DETECTION || "semantic_vad",
-          interrupt_response: process.env.LOCAL_REALTIME_OPENAI_INTERRUPT_RESPONSE !== "0",
-          create_response: true,
+          interrupt_response: quiet ? false : process.env.LOCAL_REALTIME_OPENAI_INTERRUPT_RESPONSE !== "0",
+          create_response: !quiet,
         },
       },
       output: {
@@ -3291,7 +3545,7 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "") {
     config.temperature = Number(process.env.LOCAL_REALTIME_OPENAI_TEMPERATURE);
   }
 
-  if (process.env.LOCAL_REALTIME_OPENAI_REALTIME_TRANSCRIBE === "1") {
+  if (process.env.LOCAL_REALTIME_OPENAI_REALTIME_TRANSCRIBE === "1" || quiet) {
     config.audio.input.transcription = {
       model: process.env.LOCAL_REALTIME_OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
       language: process.env.LOCAL_REALTIME_OPENAI_TRANSCRIBE_LANGUAGE || "en",
@@ -3300,6 +3554,36 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "") {
 
   if (process.env.LOCAL_REALTIME_OPENAI_REALTIME_TOOLS !== "0") {
     config.tools = [
+      {
+        type: "function",
+        name: "wait_for_user",
+        description:
+          "Call this when the latest audio should not receive a spoken response, such as silence, background noise, speaker echo, a side conversation, or speech not addressed to Codex.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+      {
+        type: "function",
+        name: "set_listening_mode",
+        description:
+          "Switch the voice bridge between normal listening and quiet mode. Use quiet when the user asks you to stop listening, mute, pause, be quiet, or not respond.",
+        parameters: {
+          type: "object",
+          properties: {
+            mode: {
+              type: "string",
+              enum: ["quiet", "listening"],
+              description: "quiet disables automatic listening and replies. listening resumes normal voice mode.",
+            },
+          },
+          required: ["mode"],
+          additionalProperties: false,
+        },
+      },
       {
         type: "function",
         name: "background_agent",
@@ -3326,18 +3610,46 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "") {
 
 function defaultRealtimeBridgeInstructions() {
   return [
+    "# Role and Objective",
     "You are the realtime voice layer inside the original Codex CLI.",
-    "Speak naturally, briefly, and clearly.",
     "Messages from Codex are authoritative. Present the system as one Codex assistant.",
+    "",
+    "# Voice Style",
+    "Speak naturally, briefly, and clearly.",
     "For casual questions, answer directly in one or two short sentences.",
+    "Do not read markdown symbols, XML tags, diffs, or asterisks out loud.",
+    "",
+    "# Listening Control",
+    "If the user asks you to stop listening, mute, pause listening, go quiet, or stop responding, call set_listening_mode with mode quiet.",
+    "If the user asks you to start listening again, resume listening, or says they are back after quiet mode, call set_listening_mode with mode listening.",
+    "",
+    "# Silence and Background Audio",
+    "If the latest audio is silence, background noise, speaker echo, a side conversation, or speech not addressed to Codex, call wait_for_user.",
+    "Do not respond conversationally after calling wait_for_user.",
+    "Do not say \"I'm here,\" \"I didn't catch that,\" \"Take your time,\" or \"Let me know when you're ready.\"",
+    "Resume normal responses only when the user clearly addresses Codex or asks for help.",
+    "",
+    "# Unclear Audio",
+    "Only act on clear audio or text.",
+    "If the user's audio is unclear, ask one short clarification question like: \"Sorry, could you repeat that clearly?\"",
+    "Do not call tools, guess codebase details, or give a preamble when the audio is unclear.",
+    "",
+    "# Preambles",
+    "Before calling background_agent for work that may take noticeable time, say one short preamble immediately, then call the tool.",
+    "Good preambles: \"I'll check that now.\" \"I'll hand that to Codex now.\" \"I'll verify that before we change anything.\"",
+    "Skip preambles for casual answers, unclear audio, quiet/listening mode commands, or tiny follow-up answers.",
+    "Do not repeat the same preamble every turn.",
+    "",
+    "# Tools",
+    "Use only the tools that are explicitly provided in this session.",
     "For coding, codebase, repo, app, terminal, debugging, install, file, realtime hook, local API, browser, computer, desktop app, website, external page, or configuration work, call background_agent with the user's exact request.",
     "If the user asks to open, check, inspect, or use their browser, computer, app, or a website, call background_agent.",
     "If the user says to do something on the side, in the background, separately, or while another task runs, still call background_agent and keep that wording in the prompt.",
-    "After calling background_agent, wait for the function result before giving task details.",
+    "After the preamble and background_agent call, wait for the function result before giving task details.",
     "Messages prefixed [BACKEND side task finished] are completed side-task results. Read the result briefly, then continue the main conversation.",
     "If Codex is already working and the user asks a small side question, answer briefly when you can.",
-    "Do not invent codebase details. Do not read markdown symbols, XML tags, diffs, or asterisks out loud.",
-  ].join(" ");
+    "Do not invent codebase details.",
+  ].join("\n");
 }
 
 function geminiLiveModel() {

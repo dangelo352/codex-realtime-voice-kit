@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as readlineKeys from "node:readline";
 import readline from "node:readline/promises";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -11,11 +12,15 @@ const rootDir = path.resolve(path.dirname(__filename), "..");
 const scriptsDir = path.join(rootDir, "scripts");
 const keychainService = "codex-realtime-voice-kit";
 const defaultCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
+const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || process.cwd(), ".codex");
+const codexConfigPath = path.join(codexHome, "config.toml");
 const configDir = path.join(
   process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || process.cwd(), ".config"),
   "codex-realtime-voice-kit",
 );
 const settingsPath = path.join(configDir, "settings.json");
+const SETTINGS_QUIT = Symbol("settings_quit");
+let pipedInputLines = null;
 
 const modes = new Map([
   [
@@ -118,24 +123,37 @@ const keySpecs = [
 
 const openAIRealtimeVoices = [
   "alloy",
-  "arbor",
   "ash",
   "ballad",
-  "breeze",
   "cedar",
   "coral",
-  "cove",
   "echo",
-  "ember",
-  "juniper",
-  "maple",
   "marin",
   "sage",
   "shimmer",
-  "sol",
-  "spruce",
-  "vale",
   "verse",
+];
+
+const codexLegacyRealtimeVoices = [
+  "juniper",
+  "maple",
+  "spruce",
+  "ember",
+  "vale",
+  "breeze",
+  "arbor",
+  "sol",
+  "cove",
+];
+
+const openAIRealtimeModels = [
+  "gpt-realtime-2",
+  "gpt-realtime-mini",
+  "gpt-realtime-1.5",
+  "gpt-realtime",
+  "gpt-realtime-mini-2025-12-15",
+  "gpt-realtime-mini-2025-10-06",
+  "gpt-realtime-2025-08-28",
 ];
 
 const geminiVoices = [
@@ -171,14 +189,68 @@ const geminiVoices = [
   "Sulafat",
 ];
 
+const geminiLiveModels = [
+  "gemini-3.1-flash-live-preview",
+  "gemini-2.5-flash-native-audio-preview-12-2025",
+  "gemini-2.5-flash-live-preview",
+  "gemini-live-2.5-flash-preview",
+  "gemini-2.0-flash-live-001",
+];
+
+const openAISttModels = [
+  "gpt-4o-mini-transcribe",
+  "gpt-4o-transcribe",
+];
+
+const groqSttModels = [
+  "whisper-large-v3-turbo",
+  "whisper-large-v3",
+];
+
+const localWhisperModels = [
+  "Xenova/whisper-tiny.en",
+  "Xenova/whisper-base.en",
+  "Xenova/whisper-small.en",
+  "Xenova/whisper-medium.en",
+];
+
+const kokoroVoices = [
+  "af_heart",
+  "af_alloy",
+  "af_aoede",
+  "af_bella",
+  "af_jessica",
+  "af_kore",
+  "af_nicole",
+  "af_nova",
+  "af_river",
+  "af_sarah",
+  "af_sky",
+  "am_adam",
+  "am_echo",
+  "am_eric",
+  "am_fenrir",
+  "am_liam",
+  "am_michael",
+  "am_onyx",
+  "am_puck",
+  "am_santa",
+];
+
 const settingsProviders = [
   {
     key: "official",
     label: "Official OpenAI realtime",
     script: "run-official-openai-realtime.sh",
     fields: [
-      { key: "model", label: "Realtime model", env: "CODEX_REALTIME_MODEL", defaultValue: "gpt-realtime-1.5" },
-      { key: "voice", label: "Voice", env: "CODEX_REALTIME_VOICE", defaultValue: "marin", choices: openAIRealtimeVoices },
+      { key: "model", label: "Realtime model", env: "CODEX_REALTIME_MODEL", defaultValue: "gpt-realtime-1.5", choices: openAIRealtimeModels },
+      {
+        key: "voice",
+        label: "Voice",
+        env: "CODEX_REALTIME_VOICE",
+        defaultValue: "marin",
+        choices: [...openAIRealtimeVoices, ...codexLegacyRealtimeVoices],
+      },
     ],
   },
   {
@@ -186,8 +258,11 @@ const settingsProviders = [
     label: "OpenAI realtime bridge",
     script: "run-openai-realtime-bridge.sh",
     fields: [
-      { key: "model", label: "Realtime model", env: "LOCAL_REALTIME_OPENAI_REALTIME_MODEL", defaultValue: "gpt-realtime-mini" },
+      { key: "model", label: "Realtime model", env: "LOCAL_REALTIME_OPENAI_REALTIME_MODEL", defaultValue: "gpt-realtime-mini", choices: openAIRealtimeModels },
       { key: "voice", label: "Voice", env: "LOCAL_REALTIME_OPENAI_REALTIME_VOICE", defaultValue: "marin", choices: openAIRealtimeVoices },
+      { key: "bargeInMode", label: "Barge-in mode", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_MODE", defaultValue: "safe", choices: ["safe", "official", "local", "off"] },
+      { key: "bargeInRms", label: "Local barge-in RMS", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_RMS", defaultValue: "3200" },
+      { key: "bargeInFrames", label: "Local barge-in frames", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_FRAMES", defaultValue: "8" },
     ],
   },
   {
@@ -195,7 +270,7 @@ const settingsProviders = [
     label: "Gemini Live",
     script: "run-gemini-live.sh",
     fields: [
-      { key: "model", label: "Live model", env: "LOCAL_REALTIME_GEMINI_MODEL", defaultValue: "gemini-3.1-flash-live-preview" },
+      { key: "model", label: "Live model", env: "LOCAL_REALTIME_GEMINI_MODEL", defaultValue: "gemini-3.1-flash-live-preview", choices: geminiLiveModels },
       { key: "voice", label: "Voice", env: "LOCAL_REALTIME_GEMINI_VOICE", defaultValue: "Aoede", choices: geminiVoices },
       { key: "bargeIn", label: "Barge-in", env: "LOCAL_REALTIME_GEMINI_ALLOW_BARGE_IN", defaultValue: "1", type: "boolean" },
       { key: "bargeInRms", label: "Barge-in RMS", env: "LOCAL_REALTIME_GEMINI_BARGE_IN_RMS", defaultValue: "4200" },
@@ -207,8 +282,8 @@ const settingsProviders = [
     label: "Groq STT + Kokoro",
     script: "run-groq-stt-kokoro.sh",
     fields: [
-      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_GROQ_TRANSCRIBE_MODEL", defaultValue: "whisper-large-v3-turbo" },
-      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_GROQ_TRANSCRIBE_MODEL", defaultValue: "whisper-large-v3-turbo", choices: groqSttModels },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart", choices: kokoroVoices },
     ],
   },
   {
@@ -216,8 +291,8 @@ const settingsProviders = [
     label: "OpenAI STT + Kokoro",
     script: "run-openai-stt-kokoro.sh",
     fields: [
-      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_TRANSCRIBE_MODEL", defaultValue: "gpt-4o-mini-transcribe" },
-      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_TRANSCRIBE_MODEL", defaultValue: "gpt-4o-mini-transcribe", choices: openAISttModels },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart", choices: kokoroVoices },
     ],
   },
   {
@@ -225,10 +300,10 @@ const settingsProviders = [
     label: "Local Whisper medium + Kokoro",
     script: "run-local-whisper-kokoro.sh",
     fields: [
-      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-medium.en" },
-      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu" },
-      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8" },
-      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-medium.en", choices: localWhisperModels },
+      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu", choices: ["cpu", "wasm"] },
+      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8", choices: ["q8", "fp32", "fp16", "q4"] },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart", choices: kokoroVoices },
     ],
   },
   {
@@ -236,17 +311,22 @@ const settingsProviders = [
     label: "Local Whisper tiny + Kokoro",
     script: "run-local-tiny-kokoro.sh",
     fields: [
-      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-tiny.en" },
-      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu" },
-      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8" },
-      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart" },
+      { key: "sttModel", label: "STT model", env: "LOCAL_REALTIME_LOCAL_STT_MODEL", defaultValue: "Xenova/whisper-tiny.en", choices: localWhisperModels },
+      { key: "device", label: "STT device", env: "LOCAL_REALTIME_LOCAL_STT_DEVICE", defaultValue: "cpu", choices: ["cpu", "wasm"] },
+      { key: "dtype", label: "STT dtype", env: "LOCAL_REALTIME_LOCAL_STT_DTYPE", defaultValue: "q8", choices: ["q8", "fp32", "fp16", "q4"] },
+      { key: "voice", label: "Kokoro voice", env: "LOCAL_REALTIME_KOKORO_VOICE", defaultValue: "af_heart", choices: kokoroVoices },
     ],
   },
 ];
 
 async function main() {
   const argv = process.argv.slice(2);
-  const command = (argv[0] || "help").toLowerCase();
+  if (!argv.length) {
+    await launchMenu();
+    return;
+  }
+
+  const command = argv[0].toLowerCase();
 
   if (command === "help" || command === "-h" || command === "--help") {
     printHelp();
@@ -265,6 +345,11 @@ async function main() {
 
   if (command === "doctor") {
     await doctor();
+    return;
+  }
+
+  if (command === "setup") {
+    await setupCodexConfig(argv.slice(1));
     return;
   }
 
@@ -297,6 +382,83 @@ async function main() {
 
   const { childArgs, options } = parseLaunchArgs(argv.slice(1));
   await launchMode(mode, childArgs, options);
+}
+
+async function launchMenu() {
+  while (true) {
+    const settings = readSettings();
+    const choice = await promptMenu({
+      title: "Codex Voice",
+      lines: [`Open Codex voice in: ${process.cwd()}`],
+      items: [
+        ...launchableModes().map(({ name, mode }) => ({
+          label: mode.label,
+          hint: launchModeDetails(name, mode, settings),
+          value: { type: "mode", mode },
+        })),
+        { label: "Setup Codex realtime", hint: "Turn on realtime_conversation in ~/.codex/config.toml.", value: { type: "setup" } },
+        { label: "Settings", hint: "Change model, voice, and provider defaults.", value: { type: "settings" } },
+        { label: "Status", hint: "Check running bridges, Codex realtime clients, and saved keys.", value: { type: "status" } },
+      ],
+      hintLabel: "Mode",
+      allowQuit: true,
+    });
+
+    if (choice === "quit" || choice === "back" || !choice) return;
+    if (choice.type === "settings") {
+      await settingsTui([]);
+      continue;
+    }
+    if (choice.type === "setup") {
+      clearScreen();
+      await setupCodexConfig([]);
+      await pauseForEnter();
+      continue;
+    }
+    if (choice.type === "status") {
+      clearScreen();
+      await printStatus();
+      await pauseForEnter();
+      continue;
+    }
+    if (choice.type === "mode") {
+      await launchMode(choice.mode, [], {});
+      return;
+    }
+  }
+}
+
+function launchableModes() {
+  return [
+    "openai-realtime",
+    "gemini",
+    "groq",
+    "openai-stt",
+    "local",
+    "tiny",
+    "moshi",
+    "official",
+  ]
+    .map((name) => ({ name, mode: resolveMode(name) }))
+    .filter((item) => item.mode?.script);
+}
+
+function launchModeDetails(name, mode, settings) {
+  const provider = providerForMode(mode);
+  const detail = provider ? providerSummary(settings, provider) : "";
+  const key = mode.key ? `${mode.key.name}: ${keySource(mode.key)}` : "No API key needed";
+  const description = {
+    official: "Uses Codex official realtime API support.",
+    "openai-realtime": "Uses OpenAI realtime for voice, then delegates code work to Codex.",
+    gemini: "Uses Gemini Live for voice, then delegates code work to Codex.",
+    groq: "Uses Groq for speech-to-text and Kokoro for spoken replies.",
+    "openai-stt": "Uses OpenAI transcription and Kokoro for spoken replies.",
+    local: "Uses local Whisper medium and Kokoro. Slower, but local for voice.",
+    tiny: "Uses local Whisper tiny and Kokoro. Faster, but less accurate.",
+    moshi: "Runs local Moshi speech-to-speech test mode.",
+  }[name] || mode.label;
+
+  return detail ? [description, detail, key] : [description, key];
 }
 
 function resolveMode(name) {
@@ -339,6 +501,7 @@ async function launchMode(mode, childArgs, options = {}) {
   const args = childArgs.length ? childArgs : [process.cwd()];
 
   console.log(`Starting: ${mode.label}`);
+  if (process.stdin.isTTY) process.stdin.pause();
   const child = spawn(scriptPath, args, {
     cwd: rootDir,
     env,
@@ -500,78 +663,191 @@ async function settingsTui(args = []) {
     return;
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    let settings = readSettings();
-    while (true) {
+  let settings = readSettings();
+  while (true) {
+    const choice = await promptMenu({
+      title: "Codex Voice Settings",
+      lines: ["Choose a provider."],
+      items: [
+        ...settingsProviders.map((provider) => ({
+          label: provider.label,
+          hint: providerSummary(settings, provider),
+          value: { type: "provider", provider },
+        })),
+        { label: "API keys", hint: keySettingsSummary(), value: { type: "keys" } },
+        { label: "Show current settings", value: { type: "show" } },
+        { label: "Reset all settings", value: { type: "reset" } },
+      ],
+      allowQuit: true,
+    });
+
+    if (choice === "quit" || choice === "back") return;
+    if (choice?.type === "show") {
       clearScreen();
-      console.log("Codex Voice Settings");
-      console.log("");
-      console.log(`Saved at: ${settingsPath}`);
-      console.log("Press Enter to keep a value. Type - to clear a value.");
-      console.log("");
-      settingsProviders.forEach((provider, index) => {
-        console.log(`${index + 1}. ${provider.label}`);
-      });
-      console.log("s. Show current settings");
-      console.log("r. Reset all settings");
-      console.log("q. Quit");
-      console.log("");
-
-      const choice = (await rl.question("Choose: ")).trim().toLowerCase();
-      if (!choice || choice === "q" || choice === "quit" || choice === "exit") break;
-      if (choice === "s" || choice === "show") {
-        clearScreen();
-        printSettings(settings);
-        await rl.question("\nPress Enter to continue...");
-        continue;
-      }
-      if (choice === "r" || choice === "reset") {
-        const confirm = (await rl.question("Delete all saved settings? [y/N] ")).trim().toLowerCase();
-        if (confirm === "y" || confirm === "yes") {
-          settings = {};
-          if (existsSync(settingsPath)) rmSync(settingsPath);
-          console.log("Settings deleted.");
-          await rl.question("Press Enter to continue...");
-        }
-        continue;
-      }
-
-      const provider = settingsProviders[Number(choice) - 1];
-      if (!provider) continue;
-      settings = await editProviderSettings(rl, settings, provider);
-      writeSettings(settings);
-      console.log(`Saved ${provider.label} settings.`);
-      await rl.question("Press Enter to continue...");
+      printSettings(settings);
+      await pauseForEnter();
+      continue;
     }
-  } finally {
-    rl.close();
+    if (choice?.type === "reset") {
+      const confirm = await promptMenu({
+        title: "Reset Settings",
+        lines: ["Delete all saved provider settings? API keys in Keychain are kept."],
+        items: [
+          { label: "No, keep settings", value: false },
+          { label: "Yes, delete all settings", value: true },
+        ],
+        allowBack: true,
+      });
+      if (confirm === true) {
+        settings = {};
+        if (existsSync(settingsPath)) rmSync(settingsPath);
+        console.log("Settings deleted.");
+        await pauseForEnter();
+      }
+      continue;
+    }
+
+    if (choice?.type === "keys") {
+      await settingsKeysTui();
+      continue;
+    }
+
+    if (choice?.type === "provider") {
+      const result = await editProviderSettings(settings, choice.provider);
+      settings = result.settings;
+      writeSettings(settings);
+      if (result.quit) return;
+    }
   }
 }
 
-async function editProviderSettings(rl, settings, provider) {
-  clearScreen();
-  console.log(provider.label);
-  console.log("");
+async function settingsKeysTui() {
+  while (true) {
+    const choice = await promptMenu({
+      title: "API Keys",
+      lines: ["Keys are saved in macOS Keychain. Env vars override Keychain for this shell."],
+      items: [
+        ...keySpecs.map((spec) => ({
+          label: `${spec.name} API key`,
+          hint: keySettingHint(spec),
+          value: { type: "key", spec },
+        })),
+        { label: "Show key status", hint: keySettingsSummary(), value: { type: "show" } },
+      ],
+      allowBack: true,
+    });
+
+    if (choice === "quit" || choice === "back") return;
+    if (choice?.type === "show") {
+      clearScreen();
+      printKeySettings();
+      await pauseForEnter();
+      continue;
+    }
+    if (choice?.type === "key") {
+      await editKeySetting(choice.spec);
+    }
+  }
+}
+
+async function editKeySetting(spec) {
+  while (true) {
+    const choice = await promptMenu({
+      title: `${spec.name} API Key`,
+      lines: [`Current: ${keySettingHint(spec)}`, "The full key is never printed."],
+      items: [
+        { label: "Set or replace Keychain key", value: "set" },
+        { label: "Delete Keychain key", value: "delete" },
+      ],
+      allowBack: true,
+    });
+
+    if (choice === "quit" || choice === "back") return;
+    if (choice === "set") {
+      if (!hasSecurity()) {
+        console.log("macOS Keychain is not available on this machine.");
+        await pauseForEnter();
+        continue;
+      }
+      const pasted = await promptKeyWithConfirmation(`${spec.name} API key`);
+      if (!pasted) {
+        console.log("No key saved.");
+        await pauseForEnter();
+        continue;
+      }
+      const ok = saveKeychain(spec.account, pasted);
+      console.log(ok ? `Saved ${spec.name} key to macOS Keychain.` : `Could not save ${spec.name} key.`);
+      await pauseForEnter();
+      continue;
+    }
+    if (choice === "delete") {
+      const confirm = await promptMenu({
+        title: `Delete ${spec.name} Key`,
+        lines: ["Remove this key from macOS Keychain? Env vars are not changed."],
+        items: [
+          { label: "No, keep key", value: false },
+          { label: "Yes, delete Keychain key", value: true },
+        ],
+        allowBack: true,
+      });
+      if (confirm === true) {
+        const ok = deleteKeychain(spec.account);
+        console.log(`${spec.name} Keychain entry: ${ok ? "deleted or not present" : "could not delete"}`);
+        await pauseForEnter();
+      }
+    }
+  }
+}
+
+async function editProviderSettings(settings, provider) {
   if (!settings[provider.key] || typeof settings[provider.key] !== "object") {
     settings[provider.key] = {};
   }
 
-  for (const field of provider.fields) {
-    const current = settings[provider.key][field.key] ?? "";
-    const shown = current || field.defaultValue || "";
-    if (field.choices?.length) {
-      console.log(`${field.label} choices: ${field.choices.join(", ")}`);
+  while (true) {
+    const saved = settings[provider.key] || {};
+    const choice = await promptMenu({
+      title: provider.label,
+      lines: ["Pick a setting to change. Esc or b goes back."],
+      items: [
+        ...provider.fields.map((field) => ({
+          label: field.label,
+          hint: settingDisplayValue(saved, field),
+          value: { type: "field", field },
+        })),
+        { label: "Clear saved settings for this provider", value: { type: "clear" } },
+      ],
+      allowBack: true,
+    });
+
+    if (choice === "quit") return finishProviderEdit(settings, provider, true);
+    if (choice === "back") break;
+    if (choice?.type === "clear") {
+      const confirm = await promptMenu({
+        title: `Clear ${provider.label}`,
+        lines: ["Remove only this provider's saved settings?"],
+        items: [
+          { label: "No, keep them", value: false },
+          { label: "Yes, clear provider settings", value: true },
+        ],
+        allowBack: true,
+      });
+      if (confirm === true) {
+        delete settings[provider.key];
+        break;
+      }
+      continue;
     }
 
-    let value;
-    if (field.type === "boolean") {
-      value = await askBooleanSetting(rl, field.label, shown);
-    } else {
-      value = (await rl.question(`${field.label} [${shown}]: `)).trim();
+    if (choice?.type !== "field") continue;
+    const field = choice.field;
+    const current = settings[provider.key]?.[field.key] ?? field.defaultValue ?? "";
+    const value = await editSettingField(field, current);
+    if (value === SETTINGS_QUIT) return finishProviderEdit(settings, provider, true);
+    if (value === undefined) continue;
+    if (!settings[provider.key] || typeof settings[provider.key] !== "object") {
+      settings[provider.key] = {};
     }
-
-    if (!value) continue;
     if (value === "-") {
       delete settings[provider.key][field.key];
       continue;
@@ -579,19 +855,58 @@ async function editProviderSettings(rl, settings, provider) {
     settings[provider.key][field.key] = value;
   }
 
-  if (!Object.keys(settings[provider.key]).length) delete settings[provider.key];
-  return settings;
+  return finishProviderEdit(settings, provider, false);
 }
 
-async function askBooleanSetting(rl, label, current) {
-  const currentBool = String(current || "1") !== "0";
-  const answer = (await rl.question(`${label} [${currentBool ? "Y" : "n"}]: `)).trim().toLowerCase();
-  if (!answer) return "";
-  if (answer === "-") return "-";
-  if (["y", "yes", "true", "1", "on"].includes(answer)) return "1";
-  if (["n", "no", "false", "0", "off"].includes(answer)) return "0";
-  console.log("Please answer y or n. Keeping current value.");
-  return "";
+function finishProviderEdit(settings, provider, quit) {
+  if (settings[provider.key] && !Object.keys(settings[provider.key]).length) {
+    delete settings[provider.key];
+  }
+  return { settings, quit };
+}
+
+async function editSettingField(field, current) {
+  if (field.type === "boolean") {
+    const currentOn = String(current || "1") !== "0";
+    return promptMenu({
+      title: field.label,
+      lines: [`Current: ${currentOn ? "On" : "Off"}`],
+      items: [
+        { label: "On", value: "1" },
+        { label: "Off", value: "0" },
+        { label: "Clear saved value", value: "-" },
+      ],
+      allowBack: true,
+    }).then((value) => {
+      if (value === "quit") return SETTINGS_QUIT;
+      if (value === "back") return undefined;
+      return value;
+    });
+  }
+
+  if (field.choices?.length) {
+    const value = await promptMenu({
+      title: field.label,
+      lines: [`Current: ${current || "(empty)"}`],
+      items: [
+        ...field.choices.map((choice) => ({ label: choice, value: choice })),
+        { label: "Custom value", value: "__custom" },
+        { label: "Clear saved value", value: "-" },
+      ],
+      allowBack: true,
+    });
+    if (value === "quit") return SETTINGS_QUIT;
+    if (value === "back") return undefined;
+    if (value === "__custom") {
+      const custom = await askLine(`Custom ${field.label}: `);
+      return custom.trim() || undefined;
+    }
+    return value;
+  }
+
+  const answer = await askLine(`${field.label} [${current || ""}]: `);
+  if (!answer.trim()) return undefined;
+  return answer.trim();
 }
 
 function printSettings(settings = readSettings()) {
@@ -607,10 +922,196 @@ function printSettings(settings = readSettings()) {
     }
     console.log("");
   }
+  printKeySettings();
+}
+
+function providerSummary(settings, provider) {
+  const saved = settings[provider.key] || {};
+  return provider.fields
+    .slice(0, 2)
+    .map((field) => `${field.label}: ${settingDisplayValue(saved, field)}`)
+    .join(" | ");
+}
+
+function settingDisplayValue(saved, field) {
+  const hasSaved = saved[field.key] !== undefined && saved[field.key] !== null && saved[field.key] !== "";
+  const value = hasSaved ? saved[field.key] : field.defaultValue || "";
+  if (field.type === "boolean") {
+    return String(value || "1") === "0" ? "Off" : "On";
+  }
+  return `${value || "(empty)"}${hasSaved ? "" : " (default)"}`;
+}
+
+function printKeySettings() {
+  console.log("API Keys");
+  for (const spec of keySpecs) {
+    console.log(`  ${spec.name}: ${keySettingHint(spec)}`);
+  }
+  console.log("");
+}
+
+function keySettingsSummary() {
+  return keySpecs.map((spec) => `${spec.name}: ${keySource(spec)}`).join(" | ");
+}
+
+function keySettingHint(spec) {
+  const envName = spec.env.find((name) => process.env[name]);
+  if (envName) return `env ${envName} ${maskSecret(process.env[envName])}`;
+  const loaded = readKeychain(spec.account);
+  if (loaded) return `keychain ${maskSecret(loaded)}`;
+  return "missing";
+}
+
+async function promptMenu({ title, lines = [], items = [], allowBack = false, allowQuit = false, hintLabel = "Current" }) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return promptMenuFallback({ title, lines, items, allowBack, allowQuit });
+  }
+
+  return new Promise((resolve) => {
+    let selected = 0;
+    let digits = "";
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    const wasPaused = stdin.isPaused();
+    readlineKeys.emitKeypressEvents(stdin);
+    stdin.setRawMode(true);
+    stdin.resume();
+
+    const cleanup = () => {
+      stdin.off("keypress", onKeypress);
+      if (!wasRaw) stdin.setRawMode(false);
+      if (wasPaused) stdin.pause();
+      process.stdout.write("\n");
+    };
+
+    const finish = (value) => {
+      cleanup();
+      resolve(value);
+    };
+
+    const chooseCurrent = () => {
+      if (digits) {
+        const index = Number(digits) - 1;
+        digits = "";
+        if (items[index]) {
+          finish(items[index].value);
+          return;
+        }
+        renderMenu({ title, lines, items, selected, digits, allowBack, allowQuit, hintLabel, error: "No item with that number." });
+        return;
+      }
+      finish(items[selected]?.value);
+    };
+
+    const onKeypress = (str, key = {}) => {
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        process.exit(130);
+      }
+      if (key.name === "escape") {
+        finish(allowBack ? "back" : "quit");
+        return;
+      }
+      if (key.name === "return") {
+        chooseCurrent();
+        return;
+      }
+      if (key.name === "up") {
+        selected = selected <= 0 ? items.length - 1 : selected - 1;
+        digits = "";
+      } else if (key.name === "down") {
+        selected = selected >= items.length - 1 ? 0 : selected + 1;
+        digits = "";
+      } else if (key.name === "backspace" || key.name === "delete") {
+        digits = digits.slice(0, -1);
+      } else if (/^[0-9]$/.test(str || "")) {
+        digits = `${digits}${str}`.replace(/^0+/, "");
+      } else if ((str || "").toLowerCase() === "b" && allowBack) {
+        finish("back");
+        return;
+      } else if ((str || "").toLowerCase() === "q") {
+        finish("quit");
+        return;
+      }
+
+      renderMenu({ title, lines, items, selected, digits, allowBack, allowQuit, hintLabel });
+    };
+
+    stdin.on("keypress", onKeypress);
+    renderMenu({ title, lines, items, selected, digits, allowBack, allowQuit, hintLabel });
+  });
+}
+
+function renderMenu({ title, lines, items, selected, digits, allowBack, allowQuit, hintLabel = "Current", error = "" }) {
+  clearScreen();
+  console.log(title);
+  console.log("");
+  for (const line of lines) console.log(line);
+  if (lines.length) console.log("");
+  items.forEach((item, index) => {
+    const marker = index === selected ? ">" : " ";
+    console.log(`${marker} ${index + 1}. ${item.label}`);
+  });
+  console.log("");
+  const selectedHint = items[selected]?.hint;
+  if (selectedHint) {
+    const hintLines = Array.isArray(selectedHint) ? selectedHint : [selectedHint];
+    console.log(`${hintLabel}: ${hintLines[0]}`);
+    for (const line of hintLines.slice(1)) {
+      console.log(`  ${line}`);
+    }
+    console.log("");
+  }
+  const parts = ["number + Enter", "Up/Down"];
+  if (allowBack) parts.push("Esc/b = Back");
+  parts.push("q = Quit");
+  console.log(parts.join("  |  "));
+  if (digits) console.log(`Choice: ${digits}`);
+  if (error) console.log(error);
+}
+
+async function promptMenuFallback({ title, lines, items, allowBack, allowQuit }) {
+  clearScreen();
+  console.log(title);
+  console.log("");
+  for (const line of lines) console.log(line);
+  if (lines.length) console.log("");
+  items.forEach((item, index) => {
+    console.log(`${index + 1}. ${item.label}`);
+  });
+  if (allowBack) console.log("b. Back");
+  console.log("q. Quit");
+  const answer = (await askLine("Choose: ")).trim().toLowerCase();
+  if (allowBack && (answer === "b" || answer === "back")) return "back";
+  if (answer === "q" || answer === "quit") return "quit";
+  return items[Number(answer) - 1]?.value;
+}
+
+async function askLine(prompt) {
+  if (!process.stdin.isTTY) {
+    process.stdout.write(prompt);
+    if (!pipedInputLines) {
+      pipedInputLines = readFileSync(0, "utf8").split(/\r?\n/);
+    }
+    const value = pipedInputLines.shift() ?? "";
+    process.stdout.write(`${value}\n`);
+    return value;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(prompt);
+  } finally {
+    rl.close();
+  }
+}
+
+async function pauseForEnter() {
+  await askLine("\nPress Enter to continue...");
 }
 
 function clearScreen() {
-  if (process.stdout.isTTY) process.stdout.write("\x1Bc");
+  if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
 }
 
 async function findFreePort(startPort) {
@@ -892,6 +1393,8 @@ async function doctor() {
   console.log(`Node: ${process.version}`);
   console.log(`Package folder: ${rootDir}`);
   console.log(`Codex binary: ${process.env.CODEX_BIN || defaultCodexBin} ${existsSync(process.env.CODEX_BIN || defaultCodexBin) ? "ok" : "missing"}`);
+  console.log(`Codex config: ${codexConfigPath}`);
+  console.log(`Codex realtime feature: ${codexRealtimeConfigStatus()}`);
   console.log(`Dependencies: ${existsSync(path.join(rootDir, "node_modules")) ? "installed" : "missing, run npm install"}`);
   console.log(`macOS Keychain: ${hasSecurity() ? "available" : "not found"}`);
   console.log(`lsof: ${commandExists("lsof") ? "available" : "missing"}`);
@@ -903,6 +1406,138 @@ async function doctor() {
   }
   console.log("");
   await printStatus();
+}
+
+async function setupCodexConfig(args = []) {
+  const dryRun = args.includes("--dry-run");
+  const noSuppressWarning = args.includes("--no-suppress-warning");
+
+  const before = existsSync(codexConfigPath) ? readFileSync(codexConfigPath, "utf8") : "";
+  let after = before;
+  after = ensureTomlSectionBoolean(after, "features", "realtime_conversation", true);
+  if (!noSuppressWarning) {
+    after = ensureTomlTopLevelBoolean(after, "suppress_unstable_features_warning", true);
+  }
+
+  console.log("Codex Voice setup");
+  console.log(`Config: ${codexConfigPath}`);
+  console.log("Will ensure:");
+  if (!noSuppressWarning) {
+    console.log("  suppress_unstable_features_warning = true");
+  }
+  console.log("  [features]");
+  console.log("  realtime_conversation = true");
+  console.log("");
+
+  if (after === before) {
+    console.log("Already configured.");
+    return;
+  }
+
+  if (dryRun) {
+    console.log("Dry run only. No files changed.");
+    return;
+  }
+
+  mkdirSync(codexHome, { recursive: true });
+
+  if (before) {
+    const backupPath = `${codexConfigPath}.backup-codex-voice-${timestampForFile()}`;
+    copyFileSync(codexConfigPath, backupPath);
+    console.log(`Backup: ${backupPath}`);
+  }
+
+  writeFileSync(codexConfigPath, after);
+  console.log("Updated Codex config.");
+  console.log("Restart any open Codex CLI sessions, then run `/realtime` inside Codex.");
+}
+
+function codexRealtimeConfigStatus() {
+  if (!existsSync(codexConfigPath)) return "missing, run codex-voice setup";
+  const text = readFileSync(codexConfigPath, "utf8");
+  return tomlSectionBooleanValue(text, "features", "realtime_conversation") === true
+    ? "enabled"
+    : "missing, run codex-voice setup";
+}
+
+function ensureTomlTopLevelBoolean(text, key, value) {
+  const lineValue = `${key} = ${value ? "true" : "false"}`;
+  let lines = normalizeTomlText(text).split("\n");
+  if (lines.length && lines.at(-1) === "") lines = lines.slice(0, -1);
+  const firstSectionIndex = lines.findIndex((line) => /^\s*\[/.test(line));
+  const searchEnd = firstSectionIndex === -1 ? lines.length : firstSectionIndex;
+  const keyPattern = new RegExp(`^\\s*${escapeRegex(key)}\\s*=`);
+
+  for (let index = 0; index < searchEnd; index += 1) {
+    if (keyPattern.test(lines[index])) {
+      lines[index] = lineValue;
+      return `${lines.join("\n")}\n`;
+    }
+  }
+
+  if (firstSectionIndex === -1) {
+    lines.push(lineValue);
+    return `${lines.join("\n")}\n`;
+  }
+
+  lines.splice(firstSectionIndex, 0, lineValue, "");
+  return `${lines.join("\n")}\n`;
+}
+
+function ensureTomlSectionBoolean(text, section, key, value) {
+  const lineValue = `${key} = ${value ? "true" : "false"}`;
+  let lines = normalizeTomlText(text).split("\n");
+  if (lines.length && lines.at(-1) === "") lines = lines.slice(0, -1);
+  const sectionPattern = new RegExp(`^\\s*\\[${escapeRegex(section)}\\]\\s*$`);
+  const keyPattern = new RegExp(`^\\s*${escapeRegex(key)}\\s*=`);
+  const sectionIndex = lines.findIndex((line) => sectionPattern.test(line));
+
+  if (sectionIndex === -1) {
+    if (lines.length && lines.at(-1).trim()) lines.push("");
+    lines.push(`[${section}]`, lineValue);
+    return `${lines.join("\n")}\n`;
+  }
+
+  let endIndex = lines.length;
+  for (let index = sectionIndex + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      endIndex = index;
+      break;
+    }
+    if (keyPattern.test(lines[index])) {
+      lines[index] = lineValue;
+      return `${lines.join("\n")}\n`;
+    }
+  }
+
+  lines.splice(endIndex, 0, lineValue);
+  return `${lines.join("\n")}\n`;
+}
+
+function tomlSectionBooleanValue(text, section, key) {
+  const lines = normalizeTomlText(text).split("\n");
+  const sectionPattern = new RegExp(`^\\s*\\[${escapeRegex(section)}\\]\\s*$`);
+  const keyPattern = new RegExp(`^\\s*${escapeRegex(key)}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "i");
+  const sectionIndex = lines.findIndex((line) => sectionPattern.test(line));
+  if (sectionIndex === -1) return undefined;
+  for (let index = sectionIndex + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) return undefined;
+    const match = lines[index].match(keyPattern);
+    if (match) return match[1].toLowerCase() === "true";
+  }
+  return undefined;
+}
+
+function normalizeTomlText(text) {
+  return String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function timestampForFile() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function uninstall({ deleteKeys = false } = {}) {
@@ -1048,9 +1683,11 @@ function printHelp() {
   console.log(`Codex realtime voice kit
 
 Usage:
+  codex-voice
   codex-voice <mode> [options] [project-folder]
   codex-voice status
   codex-voice stop
+  codex-voice setup [--dry-run] [--no-suppress-warning]
   codex-voice doctor
   codex-voice settings
   codex-voice settings show
@@ -1080,7 +1717,12 @@ Voice model options:
   --no-barge-in            Turn automatic interruption off
   --replace-key            Paste and save a fresh API key
 
+Setup options:
+  --dry-run                Show what setup would change without writing files
+  --no-suppress-warning    Do not add suppress_unstable_features_warning
+
 Examples:
+  codex-voice
   codex-voice groq
   codex-voice gemini
   codex-voice gemini --voice Leda
@@ -1094,6 +1736,7 @@ Examples:
   codex-voice groq /path/to/project
   codex-voice status
   codex-voice stop
+  codex-voice setup
 
 If no project folder is passed, it uses the current terminal folder.
 If a needed API key is missing, the CLI asks for it and can save it to macOS Keychain.

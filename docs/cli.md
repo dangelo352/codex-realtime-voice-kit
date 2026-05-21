@@ -23,9 +23,31 @@ Then test:
 codex-voice doctor
 ```
 
+Enable Codex realtime support once:
+
+```bash
+codex-voice setup
+```
+
+This updates `~/.codex/config.toml`, makes a backup first, and ensures:
+
+```toml
+suppress_unstable_features_warning = true
+
+[features]
+realtime_conversation = true
+```
+
+Use `--dry-run` to preview without changing files:
+
+```bash
+codex-voice setup --dry-run
+```
+
 ## Run Modes
 
 ```bash
+codex-voice
 codex-voice official /path/to/project
 codex-voice openai-realtime /path/to/project
 codex-voice groq /path/to/project
@@ -40,11 +62,17 @@ codex-voice moshi /path/to/project
 The project path is optional. If you are already inside the project folder, run:
 
 ```bash
+codex-voice
 codex-voice gemini
 codex-voice groq
 codex-voice openai-realtime
 codex-voice official
 ```
+
+Plain `codex-voice` opens a launcher menu from the current terminal folder.
+Each row is short, and the selected mode shows what provider/model/voice it will
+use before it opens Codex.
+The menu also includes setup, settings, and status.
 
 Inside Codex CLI, start live voice with:
 
@@ -121,6 +149,15 @@ When Codex finishes, the voice reads the full result by default.
 The bridge ignores likely speaker/output audio by default, so the assistant is
 less likely to hear its own voice.
 
+OpenAI realtime bridge defaults to `safe` barge-in mode. This is best for
+laptop speakers because it blocks speaker echo. Pure OpenAI interruption is
+available as `official`, but it is best with headphones or real echo
+cancellation:
+
+```bash
+LOCAL_REALTIME_OPENAI_BARGE_IN_MODE=official codex-voice openai-realtime
+```
+
 Barge-in is on by default in safer `transcript` mode. The bridge waits for
 Gemini to transcribe real user words before it stops the current voice. This is
 less fragile than stopping just because the mic got loud.
@@ -150,12 +187,24 @@ gemini-3.1-flash-live-preview
 Change the voice or model at launch:
 
 ```bash
+codex-voice official --voice cedar --model gpt-realtime-1.5
+codex-voice openai-realtime --voice marin --model gpt-realtime-mini
 codex-voice gemini --voice Aoede
 codex-voice gemini --voice Leda
 codex-voice gemini --model gemini-3.1-flash-live-preview
 ```
 
-List known Gemini voice names:
+Or pick from menus and save defaults:
+
+```bash
+codex-voice settings
+```
+
+The settings menu shows model and voice choices for OpenAI realtime, Gemini,
+Groq STT, OpenAI STT, local Whisper, and Kokoro. It also has a custom option if
+the provider adds a newer model before this package is updated.
+
+List known voice names:
 
 ```bash
 codex-voice voices
@@ -257,9 +306,22 @@ This checks the common setup problems:
 - Node version
 - package dependencies
 - Codex binary path
+- Codex realtime feature config
 - Keychain availability
 - audio helper tools
 - current realtime status
+
+## Settings
+
+```bash
+codex-voice settings
+codex-voice settings show
+codex-voice settings reset
+```
+
+Saved settings live at
+`~/.config/codex-realtime-voice-kit/settings.json`. Command flags and exported
+environment variables still win over saved defaults.
 
 ## Uninstall
 
