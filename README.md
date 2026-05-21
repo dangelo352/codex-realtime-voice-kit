@@ -38,6 +38,7 @@ codex-voice official --voice cedar --model gpt-realtime-1.5
 codex-voice openai-realtime --voice marin --model gpt-realtime-mini
 codex-voice gemini --voice Leda
 codex-voice gemini --model gemini-3.1-flash-live-preview
+codex-voice settings
 codex-voice status
 codex-voice stop
 codex-voice doctor
@@ -99,6 +100,7 @@ codex-voice gemini --voice Aoede
 codex-voice gemini --no-barge-in
 codex-voice gemini --model gemini-3.1-flash-live-preview
 codex-voice voices
+codex-voice settings
 ```
 
 Codex app binary default:
@@ -226,6 +228,16 @@ Or from inside the project:
 codex-voice <mode>
 ```
 
+Open the settings TUI:
+
+```bash
+codex-voice settings
+```
+
+It saves provider defaults in
+`~/.config/codex-realtime-voice-kit/settings.json`. Launch flags like
+`--voice` and `--model` still override saved settings for that one run.
+
 Modes:
 
 - `official`: official OpenAI realtime API
@@ -243,6 +255,9 @@ Management commands:
 codex-voice status
 codex-voice stop
 codex-voice doctor
+codex-voice settings
+codex-voice settings show
+codex-voice settings reset
 codex-voice key list
 codex-voice key set gemini
 codex-voice key delete gemini
