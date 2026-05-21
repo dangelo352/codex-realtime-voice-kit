@@ -120,6 +120,9 @@ class LocalRealtimeSession {
     this.openaiRealtimeInputTranscript = "";
     this.openaiRealtimeOutputTranscript = "";
     this.openaiRealtimeAudioItemId = "";
+    this.openaiRealtimeActiveResponseId = "";
+    this.openaiRealtimeResponseCreatePending = false;
+    this.openaiRealtimeHandledFunctionCalls = new Set();
     this.geminiReadyPromise = null;
     this.geminiSession = null;
     this.geminiVoiceSession = null;
@@ -494,6 +497,10 @@ class LocalRealtimeSession {
     if (event.type === "error") {
       const message = event.error?.message || event.message || "OpenAI Realtime error";
       log(`[openai.realtime] error: ${message}`);
+      if (/active response in progress/i.test(message)) {
+        this.openaiRealtimeResponseCreatePending = true;
+        return;
+      }
       await this.sendAssistantAnswer(message, { speak: false });
       return;
     }
@@ -597,12 +604,19 @@ class LocalRealtimeSession {
 
     if (event.type === "response.done") {
       await this.handleOpenAIRealtimeResponseDone(event.response || {});
+      this.openaiRealtimeActiveResponseId = "";
+      this.send(event);
+      this.flushOpenAIRealtimeResponseCreate();
+      return;
+    }
+
+    if (event.type === "response.created") {
+      this.openaiRealtimeActiveResponseId = event.response?.id || `active_${Date.now()}`;
       this.send(event);
       return;
     }
 
     if (
-      event.type === "response.created" ||
       event.type === "response.output_text.delta" ||
       event.type === "response.output_text.done" ||
       event.type === "response.content_part.added" ||
@@ -627,6 +641,15 @@ class LocalRealtimeSession {
   async handleOpenAIRealtimeFunctionCall(item) {
     if (item.name !== "background_agent") return;
     const callId = item.call_id || `call_openai_${++this.handoffCount}`;
+    if (this.openaiRealtimeHandledFunctionCalls.has(callId)) {
+      log(`[openai.realtime.tool] ignored duplicate function call_id=${callId}`);
+      return;
+    }
+    this.openaiRealtimeHandledFunctionCalls.add(callId);
+    if (this.openaiRealtimeHandledFunctionCalls.size > 100) {
+      const [oldest] = this.openaiRealtimeHandledFunctionCalls;
+      this.openaiRealtimeHandledFunctionCalls.delete(oldest);
+    }
     if (this.pendingHandoffs.has(callId)) return;
 
     let prompt = "";
@@ -685,12 +708,7 @@ class LocalRealtimeSession {
         ],
       },
     });
-    this.sendOpenAIRealtimeEvent({
-      type: "response.create",
-      response: {
-        output_modalities: ["audio"],
-      },
-    });
+    this.requestOpenAIRealtimeResponseCreate();
   }
 
   async completeOpenAIRealtimeHandoff(pending, answer) {
@@ -714,12 +732,27 @@ class LocalRealtimeSession {
         output: cleanOutput,
       },
     });
+    this.requestOpenAIRealtimeResponseCreate();
+  }
+
+  requestOpenAIRealtimeResponseCreate() {
+    if (this.openaiRealtimeActiveResponseId) {
+      this.openaiRealtimeResponseCreatePending = true;
+      log(`[openai.realtime] delayed response.create active=${this.openaiRealtimeActiveResponseId}`);
+      return;
+    }
     this.sendOpenAIRealtimeEvent({
       type: "response.create",
       response: {
         output_modalities: ["audio"],
       },
     });
+  }
+
+  flushOpenAIRealtimeResponseCreate() {
+    if (!this.openaiRealtimeResponseCreatePending) return;
+    this.openaiRealtimeResponseCreatePending = false;
+    this.requestOpenAIRealtimeResponseCreate();
   }
 
   async sendOpenAIRealtimeSideTaskResult(answer) {
@@ -2148,22 +2181,10 @@ class LocalRealtimeSession {
 
   async onResponseCreate() {
     const handoff = [...this.pendingHandoffs.values()].at(-1);
-    if (handoff?.backendText && !handoff.answerSent) {
+    if (handoff && realtimeEngine === "openai-realtime") {
+      log("[handoff] response.create received while handoff is active; waiting for Background agent finished");
+    } else if (handoff?.backendText && !handoff.answerSent) {
       handoff.answerSent = true;
-      if (handoff.target === "openai-realtime") {
-        await this.completeOpenAIRealtimeHandoff(handoff, handoff.backendText);
-        this.pendingHandoffs.delete(handoff.callId || handoff.externalCallId);
-        this.busyNoticeSent = false;
-        this.scheduleNextQueuedWork();
-        return;
-      }
-      if (handoff.target === "openai-realtime-side") {
-        await this.sendOpenAIRealtimeSideTaskResult(handoff.backendText);
-        this.pendingHandoffs.delete(handoff.callId || handoff.externalCallId);
-        this.busyNoticeSent = false;
-        this.scheduleNextQueuedWork();
-        return;
-      }
       await this.sendAssistantAnswer(handoff.backendText, {
         speechText: backendSpeechSummary(handoff.backendText),
       });
@@ -2644,7 +2665,7 @@ function handoffAcknowledgementFor(text, options = {}) {
 function isSidetrackRequest(text) {
   const normalized = repairLocalTranscript(normalizeForIntent(text || ""));
   return (
-    /\b(on the side|as a side task|side task|sidetrack|side track|side request)\b/.test(normalized) ||
+    /\b(on the side|as a side task|side task|side chat|side conversation|side thread|side check|side investigation|sidetrack|side track|side request)\b/.test(normalized) ||
     /\b(while you do that|while that runs|while it runs|while that's running|while that is running)\b/.test(normalized) ||
     /\b(in the background|separately|as a separate task|do not interrupt the current task|don't interrupt the current task)\b/.test(normalized)
   );
@@ -2652,6 +2673,7 @@ function isSidetrackRequest(text) {
 
 function stripSidetrackRequest(text) {
   return String(text || "")
+    .replace(/^\s*(open|create|start|make)\s+(a\s+)?side\s+(chat|conversation|thread)\s+(to|for)\s+/i, "")
     .replace(/\b(as a side task|side task|sidetrack|side track|side request)\b/gi, "")
     .replace(/\b(on the side|in the background|separately|as a separate task)\b/gi, "")
     .replace(/\b(while you do that|while that runs|while it runs|while that's running|while that is running)\b/gi, "")
