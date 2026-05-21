@@ -1,0 +1,36 @@
+{
+  "name": "codex-realtime-voice-kit",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "codex-voice": "./bin/codex-voice.mjs",
+    "codex-rt": "./bin/codex-voice.mjs"
+  },
+  "scripts": {
+    "server": "node src/local-codex-realtime-server.mjs",
+    "check": "node --check src/local-codex-realtime-server.mjs && node --check bin/codex-voice.mjs",
+    "openai-realtime": "./scripts/run-openai-realtime-bridge.sh",
+    "groq": "./scripts/run-groq-stt-kokoro.sh",
+    "local": "./scripts/run-local-whisper-kokoro.sh",
+    "gemini": "./scripts/run-gemini-live.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "docs",
+    "examples",
+    "README.md",
+    ".env.example"
+  ],
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@huggingface/transformers": "^3.8.1",
+    "kokoro-js": "^1.2.1",
+    "ws": "^8.20.1"
+  }
+}

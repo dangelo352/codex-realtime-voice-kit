@@ -1,0 +1,35 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Logs and temp files
+*.log
+*.stdout
+*.stderr
+*.tgz
+tmp/
+coverage/
+dist/
+
+# Python / Moshi
+.venv/
+.venv-moshi/
+.venv_moshi/
+venv/
+__pycache__/
+*.pyc
+
+# Large traces/models
+mlx-trace.json
+models/
+.cache/
+
+# Audio/model artifacts
+*.wav
+*.mp3
+*.pcm
+*.safetensors
+*.onnx
+*.gguf
