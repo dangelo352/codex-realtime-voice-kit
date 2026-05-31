@@ -31,6 +31,7 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@huggingface/transformers": "^3.8.1",
+    "@roamhq/wrtc": "^0.10.0",
     "kokoro-js": "^1.2.1",
     "ws": "^8.20.1"
   }
