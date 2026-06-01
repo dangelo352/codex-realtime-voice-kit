@@ -3652,7 +3652,7 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "", options = {}
     config.temperature = Number(process.env.LOCAL_REALTIME_OPENAI_TEMPERATURE);
   }
 
-  if (process.env.LOCAL_REALTIME_OPENAI_REALTIME_TRANSCRIBE === "1" || quiet) {
+  if (process.env.LOCAL_REALTIME_OPENAI_REALTIME_TRANSCRIBE === "1" || quiet || isXAIRealtimeUrl()) {
     config.audio.input.transcription = {
       model: process.env.LOCAL_REALTIME_OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
       language: process.env.LOCAL_REALTIME_OPENAI_TRANSCRIBE_LANGUAGE || "en",
@@ -3768,8 +3768,12 @@ function defaultRealtimeBridgeInstructions() {
     "",
     "# Unclear Audio",
     "Only act on clear audio or text.",
-    "If the user's audio is unclear, ask one short clarification question like: \"Sorry, could you repeat that clearly?\"",
-    "Do not call tools, guess codebase details, or give a preamble when the audio is unclear.",
+    "Do not repeatedly ask the user to repeat themselves.",
+    "If the latest audio is mostly unclear, silence, filler, or background noise, call wait_for_user instead of speaking.",
+    "If part of the user's request is clear enough to act on, act on that clear part or call background_agent with the exact clear words.",
+    "Ask for clarification only when the request is clearly addressed to Codex, important, and missing one specific detail.",
+    "Do not use phrases like \"repeat clearly\", \"could you repeat that\", or \"I didn't catch that\" as a default response.",
+    "Do not call tools, guess codebase details, or give a preamble when the audio is too unclear to act on.",
     "",
     "# Preambles",
     "Before calling background_agent for work that may take noticeable time, say one short preamble immediately, then call the tool.",
