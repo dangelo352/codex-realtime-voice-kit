@@ -520,7 +520,11 @@ async function launchMode(mode, childArgs, options = {}) {
 
   if (usesLocalBridge(mode)) {
     if (!env.LOCAL_REALTIME_PORT) {
-      env.LOCAL_REALTIME_PORT = String(await findFreePort(Number(env.CODEX_VOICE_PORT_START || defaultLocalRealtimePort)));
+      const preferredPort = Number(env.CODEX_VOICE_PORT_START || defaultLocalRealtimePort);
+      const preferredHealth = await getHealth(`http://127.0.0.1:${preferredPort}/health`);
+      env.LOCAL_REALTIME_PORT = preferredHealth.body.includes("local-codex-realtime")
+        ? String(preferredPort)
+        : String(await findFreePort(preferredPort));
       console.error(`Using local realtime bridge port ${env.LOCAL_REALTIME_PORT}`);
     }
     env.LOCAL_REALTIME_KILL_OLD_CODEX ??= "0";
