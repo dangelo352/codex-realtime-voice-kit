@@ -26,10 +26,26 @@ const fakeTranscript =
   process.env.LOCAL_REALTIME_FAKE_TRANSCRIPT ||
   "Say hello briefly and confirm that local realtime is connected to the original Codex CLI.";
 
+function localRealtimeHealth() {
+  return {
+    ok: true,
+    service: "local-codex-realtime",
+    engine: realtimeEngine,
+    stt: sttMode,
+    chat: chatMode,
+    model:
+      realtimeEngine === "gemini-live"
+        ? geminiLiveModel()
+        : realtimeEngine === "openai-realtime"
+          ? openAIRealtimeModel()
+          : realtimeEngine,
+  };
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, service: "local-codex-realtime" }));
+    res.end(JSON.stringify(localRealtimeHealth()));
     return;
   }
 
@@ -3725,7 +3741,13 @@ function normalizeSessionConfigForXAI(config) {
   const xaiConfig = {
     instructions: config.instructions,
     voice: output.voice || openAIRealtimeVoice(),
-    turn_detection: { type: "server_vad" },
+    turn_detection: {
+      type: "server_vad",
+      threshold: Number(process.env.LOCAL_REALTIME_XAI_VAD_THRESHOLD || 0.65),
+      prefix_padding_ms: Number(process.env.LOCAL_REALTIME_XAI_PREFIX_PADDING_MS || 300),
+      silence_duration_ms: Number(process.env.LOCAL_REALTIME_XAI_SILENCE_DURATION_MS || 900),
+      create_response: true,
+    },
   };
 
   if (config.tools) xaiConfig.tools = config.tools;
@@ -3762,6 +3784,7 @@ function defaultRealtimeBridgeInstructions() {
     "",
     "# Silence and Background Audio",
     "If the latest audio is silence, background noise, speaker echo, a side conversation, or speech not addressed to Codex, call wait_for_user.",
+    "If the latest audio is only a one-word filler, acknowledgement, or false start such as \"ja\", \"yeah\", \"yep\", \"uh\", \"um\", or \"okay\", call wait_for_user.",
     "Do not respond conversationally after calling wait_for_user.",
     "Do not say \"I'm here,\" \"I didn't catch that,\" \"Take your time,\" or \"Let me know when you're ready.\"",
     "Resume normal responses only when the user clearly addresses Codex or asks for help.",
@@ -4686,7 +4709,7 @@ server.on("request", (req, res) => {
     handleWebRTCOffer(req, res);
   } else if (url.pathname === "/health" || url.pathname === "/v1/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, service: "local-codex-realtime" }));
+    res.end(JSON.stringify(localRealtimeHealth()));
   } else {
     origOnRequest(req, res);
   }

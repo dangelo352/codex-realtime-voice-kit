@@ -43,18 +43,26 @@ if [[ -z "${OPENAI_API_KEY:-}" ]]; then
 fi
 CODEX_REALTIME_PLACEHOLDER_API_KEY="${LOCAL_REALTIME_CODEX_PLACEHOLDER_API_KEY:-local-realtime-placeholder}"
 
-started_server=0
+started_server=1
 existing_pid="$(lsof -tiTCP:"${LOCAL_REALTIME_PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
 if [[ -n "${existing_pid}" ]]; then
-  if curl -fsS "${LOCAL_REALTIME_URL}/health" 2>/dev/null | grep -q 'local-codex-realtime'; then
-    echo "Restarting old local realtime server on ${LOCAL_REALTIME_URL}"
-    kill "${existing_pid}" >/dev/null 2>&1 || true
-    for _ in {1..20}; do
-      if ! lsof -tiTCP:"${LOCAL_REALTIME_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-        break
-      fi
-      sleep 0.05
-    done
+  health_json="$(curl -fsS "${LOCAL_REALTIME_URL}/health" 2>/dev/null || true)"
+  if [[ "${health_json}" == *'"service":"local-codex-realtime"'* ]]; then
+    existing_engine="$(node -e 'try { const h = JSON.parse(process.argv[1]); process.stdout.write(String(h.engine || "")); } catch {}' "${health_json}")"
+    requested_engine="${LOCAL_REALTIME_ENGINE:-local}"
+    if [[ "${existing_engine}" == "${requested_engine}" ]]; then
+      echo "Reusing local realtime server on ${LOCAL_REALTIME_URL} (${existing_engine})"
+      started_server=0
+    else
+      echo "Restarting local realtime server on ${LOCAL_REALTIME_URL} (${existing_engine:-unknown} -> ${requested_engine})"
+      kill "${existing_pid}" >/dev/null 2>&1 || true
+      for _ in {1..40}; do
+        if ! lsof -tiTCP:"${LOCAL_REALTIME_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.05
+      done
+    fi
   else
     echo "Port ${LOCAL_REALTIME_PORT} is already in use by a different process."
     echo "Stop it first: lsof -ti tcp:${LOCAL_REALTIME_PORT} | xargs kill"
@@ -62,32 +70,34 @@ if [[ -n "${existing_pid}" ]]; then
   fi
 fi
 
-: > "${LOCAL_REALTIME_LOG}"
-echo "Local realtime log: ${LOCAL_REALTIME_LOG}"
-LOCAL_REALTIME_LOG="${LOCAL_REALTIME_LOG}" node "${ROOT_DIR}/src/local-codex-realtime-server.mjs" \
-  >/tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stdout \
-  2>/tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stderr &
-server_pid=$!
-started_server=1
+if [[ "${started_server}" != "0" ]]; then
+  : > "${LOCAL_REALTIME_LOG}"
+  echo "Local realtime log: ${LOCAL_REALTIME_LOG}"
+  LOCAL_REALTIME_LOG="${LOCAL_REALTIME_LOG}" node "${ROOT_DIR}/src/local-codex-realtime-server.mjs" \
+    >/tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stdout \
+    2>/tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stderr &
+  server_pid=$!
+  started_server=1
 
-server_ready=0
-for _ in {1..40}; do
-  if curl -fsS "${LOCAL_REALTIME_URL}/health" 2>/dev/null | grep -q 'local-codex-realtime'; then
-    server_ready=1
-    break
-  fi
-  if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
-    echo "Local realtime server exited before it became ready."
+  server_ready=0
+  for _ in {1..40}; do
+    if curl -fsS "${LOCAL_REALTIME_URL}/health" 2>/dev/null | grep -q 'local-codex-realtime'; then
+      server_ready=1
+      break
+    fi
+    if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
+      echo "Local realtime server exited before it became ready."
+      tail -n 80 /tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stderr 2>/dev/null || true
+      exit 1
+    fi
+    sleep 0.05
+  done
+
+  if [[ "${server_ready}" != "1" ]]; then
+    echo "Local realtime server did not become ready quickly enough."
     tail -n 80 /tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stderr 2>/dev/null || true
     exit 1
   fi
-  sleep 0.05
-done
-
-if [[ "${server_ready}" != "1" ]]; then
-  echo "Local realtime server did not become ready quickly enough."
-  tail -n 80 /tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.stderr 2>/dev/null || true
-  exit 1
 fi
 
 cleanup() {

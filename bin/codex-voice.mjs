@@ -124,14 +124,26 @@ const modes = new Map([
   [
     "gemini-flash-live",
     {
-      script: "run-gemini-live.sh",
-      label: "Gemini Flash Live",
+      script: "run-gemini-openai-compatible-bridge.sh",
+      label: "Gemini Flash Live OpenAI-compatible bridge",
       key: {
         env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         saveEnv: "GEMINI_API_KEY",
         account: "gemini-api-key",
         name: "Gemini API key",
       },
+    },
+  ],
+  [
+    "gemini-openai",
+    {
+      aliasFor: "gemini-flash-live",
+    },
+  ],
+  [
+    "gemini-openai-compatible",
+    {
+      aliasFor: "gemini-flash-live",
     },
   ],
   [
@@ -505,6 +517,7 @@ function launchModeDetails(name, mode, settings) {
     "openai-realtime": "Uses OpenAI realtime for voice, then delegates code work to Codex.",
     xai: "Uses xAI Grok Voice through the OpenAI-compatible realtime bridge.",
     gemini: "Uses Gemini Live for voice, then delegates code work to Codex.",
+    "gemini-flash-live": "Uses Gemini Live behind the local OpenAI-compatible realtime bridge.",
     groq: "Uses Groq for speech-to-text and Kokoro for spoken replies.",
     "openai-stt": "Uses OpenAI transcription and Kokoro for spoken replies.",
     local: "Uses local Whisper medium and Kokoro. Slower, but local for voice.",
@@ -652,7 +665,7 @@ function applyLaunchOptions(mode, env, options = {}) {
     env.LOCAL_REALTIME_GEMINI_BARGE_IN_MIN_MS = options.bargeInMinMs;
     env.LOCAL_REALTIME_BARGE_IN_MIN_MS = options.bargeInMinMs;
   }
-  if (mode.script === "run-gemini-live.sh") {
+  if (mode.script === "run-gemini-live.sh" || mode.script === "run-gemini-openai-compatible-bridge.sh") {
     if (options.voice) env.LOCAL_REALTIME_GEMINI_VOICE = options.voice;
     if (options.model) env.LOCAL_REALTIME_GEMINI_MODEL = options.model;
   } else if (mode.script === "run-official-openai-realtime.sh") {
@@ -672,6 +685,9 @@ function usesLocalBridge(mode) {
 }
 
 function providerForMode(mode) {
+  if (mode.script === "run-gemini-openai-compatible-bridge.sh") {
+    return settingsProviders.find((provider) => provider.key === "gemini") || null;
+  }
   return settingsProviders.find((provider) => provider.script === mode.script) || null;
 }
 
@@ -1767,7 +1783,8 @@ Modes:
   local          Local Whisper medium + local Kokoro voice
   tiny           Local Whisper tiny + local Kokoro voice
   gemini         Gemini Live voice model
-  gemini-flash-live  Gemini Flash Live voice model
+  gemini-flash-live  Gemini Flash Live through local OpenAI-compatible bridge
+  gemini-openai  Alias for Gemini Flash Live OpenAI-compatible bridge
   flash-live     Alias for Gemini Flash Live
   moshi          Moshi local speech-to-speech experiment
 
