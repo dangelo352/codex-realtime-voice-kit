@@ -122,6 +122,31 @@ const modes = new Map([
     },
   ],
   [
+    "gemini-flash-live",
+    {
+      script: "run-gemini-live.sh",
+      label: "Gemini Flash Live",
+      key: {
+        env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        saveEnv: "GEMINI_API_KEY",
+        account: "gemini-api-key",
+        name: "Gemini API key",
+      },
+    },
+  ],
+  [
+    "flash-live",
+    {
+      aliasFor: "gemini-flash-live",
+    },
+  ],
+  [
+    "google-live",
+    {
+      aliasFor: "gemini-flash-live",
+    },
+  ],
+  [
     "moshi",
     {
       script: "run-moshi-codex-bridge.sh",
@@ -458,6 +483,7 @@ function launchableModes() {
   return [
     "openai-realtime",
     "xai",
+    "gemini-flash-live",
     "gemini",
     "groq",
     "openai-stt",
@@ -1741,6 +1767,8 @@ Modes:
   local          Local Whisper medium + local Kokoro voice
   tiny           Local Whisper tiny + local Kokoro voice
   gemini         Gemini Live voice model
+  gemini-flash-live  Gemini Flash Live voice model
+  flash-live     Alias for Gemini Flash Live
   moshi          Moshi local speech-to-speech experiment
 
 Voice model options:
@@ -1760,6 +1788,8 @@ Examples:
   codex-voice
   codex-voice groq
   codex-voice gemini
+  codex-voice gemini-flash-live
+  codex-voice flash-live
   codex-voice gemini --voice Leda
   codex-voice official --voice cedar --model gpt-realtime-1.5
   codex-voice openai-realtime --voice marin --model gpt-realtime-mini
