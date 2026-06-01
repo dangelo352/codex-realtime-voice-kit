@@ -543,6 +543,12 @@ class LocalRealtimeSession {
       const transcript = String(event.transcript || event.delta || "").trim();
       if (transcript) {
         if (await this.maybeHandleOpenAIRealtimeListeningTranscript(transcript)) return;
+        if (
+          event.type === "conversation.item.input_audio_transcription.completed" &&
+          (await this.maybeHandleOpenAIRealtimeControlTranscript(transcript))
+        ) {
+          return;
+        }
         this.openaiRealtimeInputTranscript = appendTranscriptChunk(
           this.openaiRealtimeInputTranscript,
           transcript,
@@ -787,6 +793,56 @@ class LocalRealtimeSession {
       return true;
     }
     return false;
+  }
+
+  async maybeHandleOpenAIRealtimeControlTranscript(transcript) {
+    const normalized = repairLocalTranscript(normalizeForIntent(transcript));
+    if (!normalized) return false;
+
+    if (isStopOrDismissal(normalized)) {
+      log(`[openai.realtime.control] stop: ${transcript}`);
+      this.truncateOpenAIRealtimeAudio("transcript-stop");
+      if (this.openaiRealtimeActiveResponseId) {
+        this.sendOpenAIRealtimeEvent({ type: "response.cancel" });
+        this.openaiRealtimeActiveResponseId = "";
+      }
+      this.cancelPendingHandoffs("transcript-stop");
+      this.stopCurrentSpeechOutput("transcript-stop");
+      this.openaiRealtimeInputTranscript = "";
+      this.openaiRealtimeOutputTranscript = "";
+      this.openaiRealtimeResponseCreatePending = false;
+      this.send({ type: "output_audio_buffer.cleared" });
+      return true;
+    }
+
+    if (!isExplicitQueueOrSteerRequest(normalized)) return false;
+
+    const task = stripQueueOrSteerRequest(transcript);
+    if (!task || shouldIgnoreBusyDelegationPrompt(task)) {
+      log(`[openai.realtime.control] ignored queue/steer fragment: ${transcript}`);
+      return true;
+    }
+
+    log(`[openai.realtime.control] queue/steer: ${task}`);
+    this.truncateOpenAIRealtimeAudio("transcript-queue");
+    if (this.openaiRealtimeActiveResponseId) {
+      this.sendOpenAIRealtimeEvent({ type: "response.cancel" });
+      this.openaiRealtimeActiveResponseId = "";
+    }
+    this.stopCurrentSpeechOutput("transcript-queue");
+
+    if (this.hasActiveHandoff()) {
+      const queued = this.queueHandoff(repairDelegationText(task));
+      if (queued) this.scheduleHandoffAcknowledgement(task, { queued: true });
+    } else {
+      await this.requestBackgroundAgent(repairDelegationText(task), {
+        target: "openai-realtime",
+        source: "openai-realtime-control",
+      });
+    }
+    this.openaiRealtimeInputTranscript = "";
+    this.openaiRealtimeOutputTranscript = "";
+    return true;
   }
 
   async setOpenAIRealtimeQuiet(quiet, reason, options = {}) {
@@ -3154,6 +3210,24 @@ function isStopOrDismissal(text) {
     "quit",
     "exit",
   ].some((phrase) => text === phrase || text.startsWith(`${phrase} `));
+}
+
+function isExplicitQueueOrSteerRequest(text) {
+  return (
+    /^(queue|queued|cue|q)\b/.test(text) ||
+    /^(steer|steer it|steer this|redirect|change direction|instead|actually)\b/.test(text) ||
+    /\b(add this to the queue|queue this|do this next|next do|after that|after this)\b/.test(text)
+  );
+}
+
+function stripQueueOrSteerRequest(text) {
+  return String(text || "")
+    .replace(/^\s*(queue|queued|cue|q)\s+(this|that|it|up|to|for)?\s*/i, "")
+    .replace(/^\s*(steer|steer it|steer this|redirect|change direction)\s+(to|toward|into|so|and)?\s*/i, "")
+    .replace(/^\s*(instead|actually)\s*/i, "")
+    .replace(/^\s*(add this to the queue|queue this|do this next|next do|after that|after this)\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isSmallTalk(text) {
