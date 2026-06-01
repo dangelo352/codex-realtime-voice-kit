@@ -9,6 +9,8 @@ MOSHI_PYTHON="${MOSHI_PYTHON:-}"
 if [[ -z "${MOSHI_PYTHON}" ]]; then
   if command -v python3.12 >/dev/null 2>&1; then
     MOSHI_PYTHON="$(command -v python3.12)"
+  elif command -v python3.13 >/dev/null 2>&1; then
+    MOSHI_PYTHON="$(command -v python3.13)"
   else
     MOSHI_PYTHON="$(command -v python3)"
   fi
@@ -21,6 +23,11 @@ MOSHI_QUANTIZED="${MOSHI_QUANTIZED:-4}"
 MOSHI_HF_REPO="${MOSHI_HF_REPO:-kyutai/moshika-mlx-q4}"
 MOSHI_STDOUT="${MOSHI_STDOUT:-/tmp/codex-moshi-bridge-${MOSHI_PORT}.stdout}"
 MOSHI_STDERR="${MOSHI_STDERR:-/tmp/codex-moshi-bridge-${MOSHI_PORT}.stderr}"
+
+if [[ -d "/opt/homebrew/opt/coreutils/libexec/gnubin" ]]; then
+  export PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:${PATH}"
+fi
+export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
 
 if [[ ! -x "${MOSHI_VENV}/bin/python" ]]; then
   echo "Creating Moshi Python environment at ${MOSHI_VENV}"

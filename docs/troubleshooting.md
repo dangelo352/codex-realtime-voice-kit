@@ -25,7 +25,7 @@ export GROQ_API_KEY="replace-with-groq-api-key"
 Check the local log:
 
 ```bash
-tail -n 120 /tmp/codex-local-realtime-8787.log
+tail -n 120 /tmp/codex-local-realtime-18787.log
 ```
 
 Look for:

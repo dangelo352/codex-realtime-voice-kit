@@ -269,7 +269,7 @@ codex-voice status
 
 This checks:
 
-- local realtime bridge on port `8787`
+- local realtime bridge on port `18787`
 - Moshi bridge on port `8999`
 - Codex realtime CLI processes
 - whether API keys are available from env or Keychain

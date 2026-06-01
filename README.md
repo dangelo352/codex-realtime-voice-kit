@@ -200,6 +200,7 @@ LOCAL_REALTIME_OPENAI_BARGE_IN_MODE=official codex-voice openai-realtime
 | Mode | Command | Good For |
 | --- | --- | --- |
 | OpenAI Realtime bridge | `codex-voice openai-realtime` | Best OpenAI voice test while Codex still handles coding |
+| xAI Grok Voice bridge | `codex-voice xai` | Grok Voice Agent through the OpenAI-compatible realtime bridge |
 | Official OpenAI realtime | `codex-voice official` | Direct Codex-to-OpenAI realtime test |
 | Gemini Live | `codex-voice gemini` | Google Gemini Live voice test |
 | Groq STT + Kokoro | `codex-voice groq` | Fast cheaper speech-to-text plus local voice |
@@ -220,6 +221,7 @@ Or pass a value for one run:
 
 ```bash
 codex-voice openai-realtime --model gpt-realtime-mini --voice marin
+codex-voice xai --model grok-voice-think-fast-1.0 --voice eve
 codex-voice official --model gpt-realtime-1.5 --voice cedar
 codex-voice gemini --model gemini-3.1-flash-live-preview --voice Aoede
 ```

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CODEX_BIN="${CODEX_BIN:-/Applications/Codex.app/Contents/Resources/codex}"
-LOCAL_REALTIME_PORT="${LOCAL_REALTIME_PORT:-8787}"
+LOCAL_REALTIME_PORT="${LOCAL_REALTIME_PORT:-18787}"
 LOCAL_REALTIME_URL="http://127.0.0.1:${LOCAL_REALTIME_PORT}"
 LOCAL_REALTIME_LOG="${LOCAL_REALTIME_LOG:-/tmp/codex-local-realtime-${LOCAL_REALTIME_PORT}.log}"
 TARGET_DIR="${1:-$PWD}"

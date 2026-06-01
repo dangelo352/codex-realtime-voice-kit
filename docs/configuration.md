@@ -7,7 +7,7 @@ All config is done with environment variables.
 ```bash
 export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
 export CODEX_HOME="$HOME/.codex"
-export LOCAL_REALTIME_PORT=8787
+export LOCAL_REALTIME_PORT=18787
 ```
 
 ## OpenAI

@@ -12,6 +12,7 @@ const rootDir = path.resolve(path.dirname(__filename), "..");
 const scriptsDir = path.join(rootDir, "scripts");
 const keychainService = "codex-realtime-voice-kit";
 const defaultCodexBin = "/Applications/Codex.app/Contents/Resources/codex";
+const defaultLocalRealtimePort = 18787;
 const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || process.cwd(), ".codex");
 const codexConfigPath = path.join(codexHome, "config.toml");
 const configDir = path.join(
@@ -49,6 +50,20 @@ const modes = new Map([
     "openai-rt",
     {
       aliasFor: "openai-realtime",
+    },
+  ],
+  [
+    "xai",
+    {
+      script: "run-xai-realtime-bridge.sh",
+      label: "xAI Grok Voice realtime bridge",
+      key: { env: ["XAI_API_KEY"], account: "xai-api-key", name: "xAI API key" },
+    },
+  ],
+  [
+    "grok",
+    {
+      aliasFor: "xai",
     },
   ],
   [
@@ -117,6 +132,7 @@ const modes = new Map([
 
 const keySpecs = [
   { env: ["OPENAI_API_KEY"], account: "openai-api-key", name: "OpenAI" },
+  { env: ["XAI_API_KEY"], account: "xai-api-key", name: "xAI" },
   { env: ["GROQ_API_KEY"], account: "groq-api-key", name: "Groq" },
   { env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], account: "gemini-api-key", name: "Gemini" },
 ];
@@ -263,6 +279,16 @@ const settingsProviders = [
       { key: "bargeInMode", label: "Barge-in mode", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_MODE", defaultValue: "safe", choices: ["safe", "official", "local", "off"] },
       { key: "bargeInRms", label: "Local barge-in RMS", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_RMS", defaultValue: "3200" },
       { key: "bargeInFrames", label: "Local barge-in frames", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_FRAMES", defaultValue: "8" },
+    ],
+  },
+  {
+    key: "xai",
+    label: "xAI Grok Voice realtime bridge",
+    script: "run-xai-realtime-bridge.sh",
+    fields: [
+      { key: "model", label: "Realtime model", env: "LOCAL_REALTIME_OPENAI_REALTIME_MODEL", defaultValue: "grok-voice-think-fast-1.0", choices: ["grok-voice-think-fast-1.0", "grok-voice-latest", "Custom"] },
+      { key: "voice", label: "Voice", env: "LOCAL_REALTIME_OPENAI_REALTIME_VOICE", defaultValue: "eve", choices: ["eve", "Custom"] },
+      { key: "bargeInMode", label: "Barge-in mode", env: "LOCAL_REALTIME_OPENAI_BARGE_IN_MODE", defaultValue: "safe", choices: ["safe", "official", "local", "off"] },
     ],
   },
   {
@@ -431,6 +457,7 @@ async function launchMenu() {
 function launchableModes() {
   return [
     "openai-realtime",
+    "xai",
     "gemini",
     "groq",
     "openai-stt",
@@ -450,6 +477,7 @@ function launchModeDetails(name, mode, settings) {
   const description = {
     official: "Uses Codex official realtime API support.",
     "openai-realtime": "Uses OpenAI realtime for voice, then delegates code work to Codex.",
+    xai: "Uses xAI Grok Voice through the OpenAI-compatible realtime bridge.",
     gemini: "Uses Gemini Live for voice, then delegates code work to Codex.",
     groq: "Uses Groq for speech-to-text and Kokoro for spoken replies.",
     "openai-stt": "Uses OpenAI transcription and Kokoro for spoken replies.",
@@ -492,7 +520,7 @@ async function launchMode(mode, childArgs, options = {}) {
 
   if (usesLocalBridge(mode)) {
     if (!env.LOCAL_REALTIME_PORT) {
-      env.LOCAL_REALTIME_PORT = String(await findFreePort(Number(env.CODEX_VOICE_PORT_START || 8787)));
+      env.LOCAL_REALTIME_PORT = String(await findFreePort(Number(env.CODEX_VOICE_PORT_START || defaultLocalRealtimePort)));
       console.error(`Using local realtime bridge port ${env.LOCAL_REALTIME_PORT}`);
     }
     env.LOCAL_REALTIME_KILL_OLD_CODEX ??= "0";
@@ -600,7 +628,7 @@ function applyLaunchOptions(mode, env, options = {}) {
   } else if (mode.script === "run-official-openai-realtime.sh") {
     if (options.voice) env.CODEX_REALTIME_VOICE = options.voice.toLowerCase();
     if (options.model) env.CODEX_REALTIME_MODEL = options.model;
-  } else if (mode.script === "run-openai-realtime-bridge.sh") {
+  } else if (mode.script === "run-openai-realtime-bridge.sh" || mode.script === "run-xai-realtime-bridge.sh") {
     if (options.voice) env.LOCAL_REALTIME_OPENAI_REALTIME_VOICE = options.voice;
     if (options.model) env.LOCAL_REALTIME_OPENAI_REALTIME_MODEL = options.model;
   } else if (options.voice) {
@@ -1247,7 +1275,7 @@ async function manageKeys(args) {
   }
 
   if (!spec) {
-    console.error("Choose a key: openai, groq, or gemini");
+    console.error("Choose a key: openai, xai, groq, or gemini");
     console.error("Examples:");
     console.error("  codex-voice key set gemini");
     console.error("  codex-voice key delete gemini");
@@ -1272,14 +1300,15 @@ async function manageKeys(args) {
   }
 
   console.error(`Unknown key action: ${action}`);
-  console.error("Use: codex-voice key list | key set openai | key set gemini | key delete gemini");
+  console.error("Use: codex-voice key list | key set openai | key set xai | key set gemini | key delete gemini");
   process.exit(1);
 }
 
 function findKeySpec(name) {
   if (name === "openai" || name === "official" || name === "openai-realtime" || name === "realtime") return keySpecs[0];
-  if (name === "groq") return keySpecs[1];
-  if (name === "gemini" || name === "google") return keySpecs[2];
+  if (name === "xai" || name === "grok") return keySpecs[1];
+  if (name === "groq") return keySpecs[2];
+  if (name === "gemini" || name === "google") return keySpecs[3];
   return null;
 }
 
@@ -1291,7 +1320,7 @@ function maskSecret(value) {
 }
 
 async function printStatus({ json = false } = {}) {
-  const localPort = Number(process.env.LOCAL_REALTIME_PORT || 8787);
+  const localPort = Number(process.env.LOCAL_REALTIME_PORT || defaultLocalRealtimePort);
   const moshiPort = Number(process.env.MOSHI_PORT || 8999);
   const processes = listKnownProcesses();
   const localHealth = await getHealth(`http://127.0.0.1:${localPort}/health`);
@@ -1353,7 +1382,7 @@ function printServiceLine(label, service, expectedName) {
 }
 
 async function stopKnownProcesses() {
-  const localPort = Number(process.env.LOCAL_REALTIME_PORT || 8787);
+  const localPort = Number(process.env.LOCAL_REALTIME_PORT || defaultLocalRealtimePort);
   const moshiPort = Number(process.env.MOSHI_PORT || 8999);
   const processes = listKnownProcesses();
   const targets = new Set([
@@ -1694,6 +1723,7 @@ Usage:
   codex-voice settings reset
   codex-voice voices
   codex-voice key list
+  codex-voice key set xai
   codex-voice key set gemini
   codex-voice key delete gemini
   codex-voice uninstall [--delete-keys]
@@ -1701,6 +1731,7 @@ Usage:
 Modes:
   official       Official OpenAI realtime API
   openai-realtime  OpenAI realtime API through local bridge
+  xai            xAI Grok Voice via OpenAI-compatible realtime bridge
   groq           Groq speech-to-text + local Kokoro voice
   openai-stt     OpenAI speech-to-text + local Kokoro voice
   local          Local Whisper medium + local Kokoro voice
@@ -1709,8 +1740,8 @@ Modes:
   moshi          Moshi local speech-to-speech experiment
 
 Voice model options:
-  --voice <name>           Official/OpenAI/Gemini voice override
-  --model <model>          Official/OpenAI/Gemini realtime model override
+  --voice <name>           Official/OpenAI/xAI/Gemini voice override
+  --model <model>          Official/OpenAI/xAI/Gemini realtime model override
   --barge-in-rms <number>  Lower means easier interruption
   --barge-in-min-ms <ms>   How soon interruption can stop speech
   --barge-in               Turn automatic interruption on
@@ -1728,6 +1759,7 @@ Examples:
   codex-voice gemini --voice Leda
   codex-voice official --voice cedar --model gpt-realtime-1.5
   codex-voice openai-realtime --voice marin --model gpt-realtime-mini
+  codex-voice xai --voice eve --model grok-voice-think-fast-1.0
   codex-voice gemini --barge-in --barge-in-rms 4200
   codex-voice openai-realtime
   codex-voice official

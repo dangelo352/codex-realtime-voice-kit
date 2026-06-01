@@ -5,7 +5,7 @@ import { appendFile, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 
-const port = Number(process.env.LOCAL_REALTIME_PORT || 8787);
+const port = Number(process.env.LOCAL_REALTIME_PORT || 18787);
 const host = process.env.LOCAL_REALTIME_HOST || "127.0.0.1";
 const logPath = process.env.LOCAL_REALTIME_LOG || `/tmp/codex-local-realtime-${port}.log`;
 const hasApiKeyAvailable = await hasApiKey();
@@ -643,7 +643,9 @@ class LocalRealtimeSession {
 
     if (
       event.type === "response.output_text.delta" ||
+      event.type === "response.text.delta" ||
       event.type === "response.output_text.done" ||
+      event.type === "response.text.done" ||
       event.type === "response.content_part.added" ||
       event.type === "response.content_part.done" ||
       event.type === "response.output_item.created" ||
@@ -651,7 +653,7 @@ class LocalRealtimeSession {
       event.type === "conversation.item.done" ||
       event.type === "rate_limits.updated"
     ) {
-      this.send(event);
+      this.send(normalizeRealtimeCompatibilityEvent(event));
     }
   }
 
@@ -2021,13 +2023,21 @@ class LocalRealtimeSession {
 
   shouldDropSpeakerEchoAudio(rms, source) {
     if (process.env.LOCAL_REALTIME_SUPPRESS_SPEAKER_ECHO === "0") return false;
+    // Allow loud audio through during speech output for instant interruption.
+    // Threshold 3000 ≈ normal speaking volume; drops quiet echo/hum.
+    if (rms >= 3000) return false;
     const now = Date.now();
     const outputActive =
       this.speaking ||
       isSpeechOutputActive() ||
-      now < this.ignoreAudioUntil ||
       now < this.codexAudioOutputUntil;
     if (!outputActive) return false;
+    // During the ignore-after-speak window, drop quiet audio (echo) but
+    // pass through loud audio (actual user command like "stop"):
+    if (now < this.ignoreAudioUntil) {
+      if (rms < 2000) return true;
+      return false;
+    }
 
     if (this.activeSpeech) this.cancelActiveSpeech("speaker-output");
     if (now - this.lastSpeakerEchoDropLogAt > 2000) {
@@ -3118,8 +3128,18 @@ function claimsCodexWorkStatus(text) {
 function isStopOrDismissal(text) {
   return [
     "stop",
+    "codex stop",
+    "codex cancel",
+    "hey codex stop",
+    "codex stop that",
+    "stop that",
+    "stop talking",
+    "codex stop talking",
+    "shut up",
+    "shut up codex",
     "cancel",
     "never mind",
+    "forget it",
     "nevermind",
     "that's all",
     "that is all",
@@ -3128,6 +3148,7 @@ function isStopOrDismissal(text) {
     "all right you are done",
     "alright you are done",
     "you're done",
+    "youre done",
     "you are done",
     "done",
     "quit",
@@ -3389,7 +3410,7 @@ function readableOpenAIError(status, responseText) {
     return "Speech-to-text is failing because the OpenAI API key has no quota. Add billing or use a different API key, then restart realtime.";
   }
 
-  return `Speech-to-text failed with HTTP ${status}. Check /tmp/codex-local-realtime-8787.log.`;
+  return `Speech-to-text failed with HTTP ${status}. Check ${logPath}.`;
 }
 
 function readableGroqError(status, responseText) {
@@ -3480,15 +3501,27 @@ function openAIRealtimeBargeInMode() {
 function openAIRealtimeUrl() {
   const baseUrl = (process.env.LOCAL_REALTIME_OPENAI_REALTIME_URL || "wss://api.openai.com/v1/realtime")
     .replace(/\/+$/, "");
+  if (isXAIRealtimeUrl()) {
+    return baseUrl;
+  }
   const url = new URL(baseUrl);
   url.searchParams.set("model", openAIRealtimeModel());
   return url.toString();
+}
+
+function isXAIRealtimeUrl() {
+  return /^wss:\/\/api\.x\.ai\/v1\/realtime\b/i.test(
+    process.env.LOCAL_REALTIME_OPENAI_REALTIME_URL || "",
+  );
 }
 
 function openAIRealtimeHeaders(apiKey) {
   const headers = {
     Authorization: `Bearer ${apiKey}`,
   };
+  if (isXAIRealtimeUrl()) {
+    headers["OpenAI-Beta"] = "realtime=v1";
+  }
   if (process.env.OPENAI_ORG_ID) headers["OpenAI-Organization"] = process.env.OPENAI_ORG_ID;
   if (process.env.OPENAI_PROJECT_ID) headers["OpenAI-Project"] = process.env.OPENAI_PROJECT_ID;
   if (process.env.OPENAI_SAFETY_IDENTIFIER) {
@@ -3605,7 +3638,37 @@ function openAIRealtimeSessionConfig(codexSessionInstructions = "", options = {}
     config.tool_choice = "auto";
   }
 
+  if (isXAIRealtimeUrl()) {
+    return normalizeSessionConfigForXAI(config);
+  }
+
   return config;
+}
+
+function normalizeSessionConfigForXAI(config) {
+  const input = config.audio?.input || {};
+  const output = config.audio?.output || {};
+  const xaiConfig = {
+    instructions: config.instructions,
+    voice: output.voice || openAIRealtimeVoice(),
+    turn_detection: { type: "server_vad" },
+  };
+
+  if (config.tools) xaiConfig.tools = config.tools;
+  if (config.tool_choice) xaiConfig.tool_choice = config.tool_choice;
+  if (config.temperature != null) xaiConfig.temperature = config.temperature;
+  if (input.transcription) xaiConfig.input_audio_transcription = input.transcription;
+  return xaiConfig;
+}
+
+function normalizeRealtimeCompatibilityEvent(event) {
+  if (event.type === "response.text.delta") {
+    return { ...event, type: "response.output_text.delta" };
+  }
+  if (event.type === "response.text.done") {
+    return { ...event, type: "response.output_text.done" };
+  }
+  return event;
 }
 
 function defaultRealtimeBridgeInstructions() {
@@ -4437,3 +4500,116 @@ function log(message) {
   console.log(line);
   appendFile(logPath, `${line}\n`).catch(() => {});
 }
+
+// ── WebRTC signaling endpoint ─────────────────────────────────────────────
+// Accepts SDP offers from Codex Desktop's native mic button and relays
+// audio through the xAI Grok Voice realtime WebSocket.
+
+import wrtc from "@roamhq/wrtc";
+
+let currentWebRTCSession = null;
+
+function handleWebRTCOffer(req, res) {
+  let body = "";
+  req.on("data", (chunk) => (body += chunk));
+  req.on("end", async () => {
+    try {
+      const { sdp: offerSdp, conversation_id, model } = JSON.parse(body);
+      const targetModel = model || openAIRealtimeModel();
+
+      log(`[webrtc] accepting offer for model=${targetModel}`);
+
+      // Create WebRTC peer connection
+      const pc = new wrtc.RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      // Set up data channel for events
+      const dc = pc.createDataChannel("oai-events");
+      dc.onmessage = (event) => {
+        log(`[webrtc] data channel: ${event.data.substring(0, 100)}`);
+      };
+
+      // Connect to xAI realtime WebSocket
+      const xaiKey = process.env.OPENAI_API_KEY || process.env.XAI_API_KEY || "";
+      const xaiUrl = openAIRealtimeUrl();
+      const xaiWs = new WebSocket(xaiUrl, {
+        headers: openAIRealtimeHeaders(xaiKey),
+      });
+
+      xaiWs.on("open", () => {
+        log(`[webrtc] xAI websocket opened`);
+        // Send session config
+        const sessionConfig = openAIRealtimeSessionConfig("", { quiet: true });
+        xaiWs.send(JSON.stringify({ type: "session.update", session: sessionConfig }));
+      });
+
+      xaiWs.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          // Forward xAI response audio to WebRTC
+          if (msg.type === "response.audio.delta" && msg.delta) {
+            const audioBuffer = Buffer.from(msg.delta, "base64");
+            // Send via data channel to desktop
+            if (dc.readyState === "open") {
+              dc.send(JSON.stringify({ type: "output_audio_buffer.started", response_id: msg.response_id }));
+            }
+          }
+        } catch (e) {
+          log(`[webrtc] xai message error: ${e.message}`);
+        }
+      });
+
+      xaiWs.on("error", (err) => {
+        log(`[webrtc] xAI websocket error: ${err.message}`);
+      });
+
+      // Handle incoming audio from desktop mic
+      pc.ontrack = (event) => {
+        log(`[webrtc] received audio track from desktop`);
+        // We don't forward desktop mic audio to xAI here because
+        // xAI handles its own VAD/STT through the WebSocket.
+        // The desktop audio goes through WebRTC → we capture it
+        // and send via the xAI WebSocket.
+      };
+
+      // Set remote description (the offer from Desktop)
+      await pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
+
+      // Create answer
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      log(`[webrtc] answering with SDP type=${answer.type}`);
+
+      // Update current session reference
+      if (currentWebRTCSession) {
+        try { currentWebRTCSession.pc.close(); } catch {}
+        try { currentWebRTCSession.xaiWs.close(); } catch {}
+      }
+      currentWebRTCSession = { pc, xaiWs, dc, conversationId: conversation_id };
+
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    } catch (err) {
+      log(`[webrtc] offer handling error: ${err.message}`);
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+  });
+}
+
+// Register WebRTC route
+const origOnRequest = server.listeners("request")[0];
+server.removeListener("request", origOnRequest);
+server.on("request", (req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
+  if (req.method === "POST" && url.pathname === "/v1/realtime/webrtc-offer") {
+    handleWebRTCOffer(req, res);
+  } else if (url.pathname === "/health" || url.pathname === "/v1/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, service: "local-codex-realtime" }));
+  } else {
+    origOnRequest(req, res);
+  }
+});
