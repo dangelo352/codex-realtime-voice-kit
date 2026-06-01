@@ -20,6 +20,7 @@ const configDir = path.join(
   "codex-realtime-voice-kit",
 );
 const settingsPath = path.join(configDir, "settings.json");
+const activeBackendPath = path.join(configDir, "active-backend");
 const SETTINGS_QUIT = Symbol("settings_quit");
 let pipedInputLines = null;
 
@@ -401,6 +402,11 @@ async function main() {
     return;
   }
 
+  if (command === "switch" || command === "backend" || command === "use") {
+    await switchBackend(argv.slice(1));
+    return;
+  }
+
   if (command === "stop") {
     await stopKnownProcesses();
     return;
@@ -704,6 +710,103 @@ function readSettings() {
 function writeSettings(settings) {
   mkdirSync(configDir, { recursive: true });
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function normalizeBackendName(name) {
+  const value = String(name || "").toLowerCase().trim();
+  if (["gemini", "gemini-live", "gemini-flash-live", "gemini-openai", "google", "google-live", "flash-live"].includes(value)) {
+    return "gemini";
+  }
+  if (["xai", "grok", "grok-voice"].includes(value)) return "xai";
+  if (["openai", "openai-realtime", "realtime"].includes(value)) return "openai";
+  return "";
+}
+
+function backendRuntime(backend) {
+  if (backend === "gemini") {
+    return {
+      engine: "gemini-live",
+      stt: "gemini-live",
+      chat: "gemini-live",
+      model: "gemini-3.1-flash-live-preview",
+      voice: "Aoede",
+    };
+  }
+  if (backend === "xai") {
+    return {
+      engine: "openai-realtime",
+      stt: "openai-realtime",
+      chat: "openai-realtime",
+      model: "grok-voice-think-fast-1.0",
+      voice: "eve",
+    };
+  }
+  if (backend === "openai") {
+    return {
+      engine: "openai-realtime",
+      stt: "openai-realtime",
+      chat: "openai-realtime",
+      model: "gpt-realtime-mini",
+      voice: "marin",
+    };
+  }
+  return null;
+}
+
+function readActiveBackend() {
+  if (!existsSync(activeBackendPath)) return "gemini";
+  return normalizeBackendName(readFileSync(activeBackendPath, "utf8")) || "gemini";
+}
+
+function writeActiveBackend(backend) {
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(activeBackendPath, `${backend}\n`);
+}
+
+async function switchBackend(args) {
+  const requested = args[0] || "";
+  if (!requested || requested === "status" || requested === "current") {
+    const backend = readActiveBackend();
+    const health = await getHealth(`http://127.0.0.1:${Number(process.env.LOCAL_REALTIME_PORT || defaultLocalRealtimePort)}/health`);
+    console.log(`Configured backend: ${backend}`);
+    if (health.ok) console.log(`Hosted bridge: ${health.body}`);
+    return;
+  }
+
+  const backend = normalizeBackendName(requested);
+  const runtime = backendRuntime(backend);
+  if (!runtime) {
+    console.error("Choose backend: gemini, xai, or openai");
+    process.exit(1);
+  }
+
+  writeActiveBackend(backend);
+  console.log(`Configured backend: ${backend}`);
+  await restartLaunchdBridge();
+  const localPort = Number(process.env.LOCAL_REALTIME_PORT || defaultLocalRealtimePort);
+  for (let i = 0; i < 40; i += 1) {
+    const health = await getHealth(`http://127.0.0.1:${localPort}/health`);
+    if (health.ok && health.body.includes(runtime.engine) && health.body.includes(runtime.model)) {
+      console.log(`Hosted bridge: ${health.body}`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const health = await getHealth(`http://127.0.0.1:${localPort}/health`);
+  console.log(`Hosted bridge not confirmed yet: ${health.body || "no health response"}`);
+}
+
+async function restartLaunchdBridge() {
+  const plist = path.join(process.env.HOME || "", "Library/LaunchAgents/com.codex.realtime-bridge.plist");
+  if (!existsSync(plist) || !commandExists("launchctl")) {
+    console.log("LaunchAgent not found; backend will apply next time the bridge starts.");
+    return;
+  }
+  const uid = process.getuid?.();
+  const domain = uid == null ? "gui/$(id -u)" : `gui/${uid}`;
+  spawnSync("launchctl", ["bootout", `${domain}/com.codex.realtime-bridge`], { stdio: "ignore" });
+  spawnSync("launchctl", ["bootstrap", domain, plist], { stdio: "ignore" });
+  spawnSync("launchctl", ["kickstart", "-k", `${domain}/com.codex.realtime-bridge`], { stdio: "ignore" });
 }
 
 function applySavedSettings(mode, env, settings) {
@@ -1401,6 +1504,7 @@ async function printStatus({ json = false } = {}) {
   }
 
   console.log("Codex realtime voice status");
+  console.log(`Configured backend: ${readActiveBackend()}`);
   printServiceLine("Local bridge", status.localBridge, "local-codex-realtime");
   printServiceLine("Moshi bridge", status.moshiBridge, "moshi-codex-bridge");
   console.log(
@@ -1762,6 +1866,7 @@ Usage:
   codex-voice <mode> [options] [project-folder]
   codex-voice status
   codex-voice stop
+  codex-voice switch <gemini|xai|openai>
   codex-voice setup [--dry-run] [--no-suppress-warning]
   codex-voice doctor
   codex-voice settings
@@ -1807,6 +1912,8 @@ Examples:
   codex-voice gemini
   codex-voice gemini-flash-live
   codex-voice flash-live
+  codex-voice switch gemini
+  codex-voice switch xai
   codex-voice gemini --voice Leda
   codex-voice official --voice cedar --model gpt-realtime-1.5
   codex-voice openai-realtime --voice marin --model gpt-realtime-mini
